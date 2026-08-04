@@ -209,7 +209,7 @@ impl ToolOutput for PostToolUseFeedbackOutput {
     }
 
     fn code_mode_result(&self, payload: &ToolPayload) -> Value {
-        self.original.code_mode_result(payload)
+        self.model_visible.code_mode_result(payload)
     }
 }
 

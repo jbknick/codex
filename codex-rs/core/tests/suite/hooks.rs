@@ -3594,6 +3594,85 @@ async fn post_tool_use_exit_two_rejects_code_mode_tool_promise() -> Result<()> {
 }
 
 #[tokio::test]
+async fn post_tool_use_continue_false_replaces_code_mode_tool_result() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "posttooluse-code-mode-continue-false";
+    let marker_dir = TempDir::new().context("create post tool stop marker directory")?;
+    let marker = marker_dir.path().join("continue-false");
+    let command = format!(
+        "printf executed > {}; printf original-post-tool-result",
+        marker.display()
+    );
+    let command_json = serde_json::to_string(&command).context("serialize post hook command")?;
+    let code = format!(
+        r#"
+const result = await tools.exec_command({{ cmd: {command_json} }});
+text(JSON.stringify({{ kind: "success", result }}));
+"#
+    );
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_custom_tool_call(call_id, "exec", &code),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "post hook stop observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let stop_reason = "replace nested result after execution";
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_pre_build_hook(move |home| {
+            write_post_tool_use_hook(home, Some("^Bash$"), "continue_false", stop_reason)
+                .expect("failed to write stopping post tool use hook fixture");
+        })
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn_with_permission_profile(
+        "run the shell command stopped after execution from code mode",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].custom_tool_call_output(call_id);
+    let output = code_mode_custom_tool_output_text(&output_item);
+    assert!(output.contains(r#""kind":"success""#), "{output}");
+    assert!(output.contains(stop_reason));
+    assert!(!output.contains("original-post-tool-result"));
+    assert_eq!(
+        fs::read_to_string(&marker).context("read stopping post tool marker")?,
+        "executed",
+        "PostToolUse should run after the nested command executes"
+    );
+
+    let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert_eq!(
+        hook_inputs[0]["tool_response"],
+        Value::String("original-post-tool-result".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn plugin_pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

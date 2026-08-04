@@ -471,7 +471,7 @@ async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
 }
 
 #[test]
-fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
+fn post_tool_use_feedback_output_replaces_code_mode_result() {
     let result = AnyToolResult {
         call_id: "call-1".to_string(),
         payload: ToolPayload::Function {
@@ -518,7 +518,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
 
     assert_eq!(
         result.code_mode_result(),
-        serde_json::json!({ "typed": true })
+        serde_json::json!("hook feedback")
     );
 }
 
