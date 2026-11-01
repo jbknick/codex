@@ -1,0 +1,87 @@
+diff --git a/news/+xml-declaration-whitespace.bugfix b/news/+xml-declaration-whitespace.bugfix
+new file mode 100644
+index 000000000..90b419d3a
+--- /dev/null
++++ b/news/+xml-declaration-whitespace.bugfix
+@@ -0,0 +1 @@
++Fixed the quadratic run time of :meth:`Component.to_xcal <icalendar.cal.component.Component.to_xcal>` and :attr:`vXml.element <icalendar.prop.xml.vXml.element>` for an ``XML`` property whose XML declaration contains a long run of whitespace. I used AI to assist me with this change. @shamsManna
+diff --git a/src/icalendar/prop/xml.py b/src/icalendar/prop/xml.py
+index 759854335..4b80f8015 100644
+--- a/src/icalendar/prop/xml.py
++++ b/src/icalendar/prop/xml.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import re
++import sys
+ from contextlib import contextmanager, suppress
+ from copy import copy, deepcopy
+ from io import BytesIO
+@@ -23,10 +24,25 @@
+     from icalendar.compatibility import Self
+ 
+ # The text is already decoded, so an encoding in the XML declaration does not apply.
+-_DECLARED_ENCODING = re.compile(
+-    r"""^(\ufeff?<\?xml\s[^>]*?)\s+encoding\s*=\s*("[^"]*"|'[^']*')""",
+-    re.ASCII,
+-)
++# With ``[^>]*?\s+encoding``, the whitespace run before the attribute is retried
++# from every position that the lazy ``[^>]*?`` reaches, so a long run of whitespace
++# in the declaration takes quadratic time.
++if sys.version_info >= (3, 11):
++    # Possessive quantifiers match the declaration as alternating runs of
++    # whitespace and other characters that are never given back, so the match is
++    # linear and all whitespace before ``encoding`` is removed.
++    _DECLARED_ENCODING = re.compile(
++        r"""^(\ufeff?<\?xml\s[^\s>]*+(?:\s++[^\s>]++)*?)\s++encoding\s*+=\s*+"""
++        r"""("[^"]*+"|'[^']*+')""",
++        re.ASCII,
++    )
++else:
++    # A single ``\s`` before ``encoding`` keeps the match linear.
++    # The whitespace that stays in the declaration is valid XML.
++    _DECLARED_ENCODING = re.compile(
++        r"""^(\ufeff?<\?xml\s[^>]*?)\sencoding\s*=\s*("[^"]*"|'[^']*')""",
++        re.ASCII,
++    )
+ # Bytes are decoded with the encoding of their XML declaration.
+ _DECLARED_ENCODING_OF_BYTES = re.compile(
+     rb"""^<\?xml\s[^>]*?\sencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)["']"""
+diff --git a/src/icalendar/tests/rfc_6321_xcal/test_xml_property.py b/src/icalendar/tests/rfc_6321_xcal/test_xml_property.py
+index ff0a7125a..5d6999ff9 100644
+--- a/src/icalendar/tests/rfc_6321_xcal/test_xml_property.py
++++ b/src/icalendar/tests/rfc_6321_xcal/test_xml_property.py
+@@ -20,6 +20,7 @@
+ 
+ import base64
+ import re
++import time
+ import xml.etree.ElementTree as ET
+ from io import BytesIO
+ from xml.etree.ElementTree import Element, ParseError, fromstring, tostring
+@@ -287,6 +288,25 @@ def test_xml_property_to_xcal_ignores_the_declared_encoding(declaration):
+     assert Event.from_xcal(event.to_xcal())[0]["XML"].element.text == "café €"
+ 
+ 
++@pytest.mark.parametrize("whitespace", [" ", "\t", "\n"])
++def test_xml_property_to_xcal_with_long_whitespace_in_the_declaration(whitespace):
++    """A long run of whitespace in the XML declaration is parsed in linear time.
++
++    The regex that removes the declared encoding used to retry the whitespace
++    before ``encoding`` from every position, so this took minutes.
++    The bound is generous enough to never flake on slow CI.
++    """
++    event = Event()
++    event.add(
++        "XML",
++        '<?xml version="1.0"' + whitespace * 200_000 + '?><a xmlns="urn:x">text</a>',
++    )
++    start = time.perf_counter()
++    xcal = event.to_xcal()
++    assert time.perf_counter() - start < 5
++    assert Event.from_xcal(xcal)[0]["XML"].element.text == "text"
++
++
+ # icalendar objects -> iCal/jCal
+ 
+ 
