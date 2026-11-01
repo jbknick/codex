@@ -1,0 +1,41 @@
+diff --git a/news/1930.internal b/news/1930.internal
+new file mode 100644
+index 000000000..c66e3675e
+--- /dev/null
++++ b/news/1930.internal
+@@ -0,0 +1,4 @@
++github handle: fishingpoleroid
++AI Disclosure: Claude Opus 5.5 was used to locate functions missing type-hints.
++
++Added type hints to vRecur class.
+\ No newline at end of file
+diff --git a/src/icalendar/prop/recur/recur.py b/src/icalendar/prop/recur/recur.py
+index 09c5fca59..e026c618f 100644
+--- a/src/icalendar/prop/recur/recur.py
++++ b/src/icalendar/prop/recur/recur.py
+@@ -237,14 +237,14 @@ def to_ical(self):
+         return b";".join(result)
+ 
+     @classmethod
+-    def parse_type(cls, key, values):
++    def parse_type(cls, key: str, values: str) -> list[Any]:
+         # integers
+         key = cls._normalize_key(key)
+         parser = cls.types.get(key, vText)
+         return [parser.from_ical(v) for v in values.split(",")]
+ 
+     @classmethod
+-    def from_ical(cls, ical: str):
++    def from_ical(cls, ical: str) -> Self:
+         if isinstance(ical, cls):
+             return ical
+         try:
+@@ -271,7 +271,7 @@ def examples(cls) -> list[Self]:
+ 
+     from icalendar.param import VALUE
+ 
+-    def to_jcal(self, name: str) -> list:
++    def to_jcal(self, name: str) -> list[Any]:
+         """The jCal representation of this property according to :rfc:`7265`."""
+         recur = {}
+         for k, v in self._normalized().sorted_items():
