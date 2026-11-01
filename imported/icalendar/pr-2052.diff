@@ -1,0 +1,86 @@
+diff --git a/news/1840.feature b/news/1840.feature
+new file mode 100644
+index 000000000..a6f63d49b
+--- /dev/null
++++ b/news/1840.feature
+@@ -0,0 +1 @@
++``icalendar.enums.StrEnum`` values are now looked up case-insensitively by the constructor, so ``PARTSTAT("needs-action")`` equals ``PARTSTAT.NEEDS_ACTION``, as :rfc:`5545` section 3.1.1 allows for values that are not quoted. I used AI to assist me with this change. @guan5313
+diff --git a/src/icalendar/enums.py b/src/icalendar/enums.py
+index 68c4663ca..d222a2fd2 100644
+--- a/src/icalendar/enums.py
++++ b/src/icalendar/enums.py
+@@ -31,6 +31,27 @@ def __str__(self) -> str:
+         """
+         return self.value
+ 
++    @classmethod
++    def _missing_(cls, value: object) -> Self | None:
++        """Look up a value case-insensitively.
++
++        The RFCs allow values that are not quoted to be case-insensitive,
++        see :rfc:`5545` section 3.1.1. Thus, this enables ``PARTSTAT(
++        "needs-action")`` to find ``PARTSTAT.NEEDS_ACTION``.
++
++        Parameters:
++            value: The value to look up.
++
++        Returns:
++            The member with that value in any case, or None if there is
++            no such member.
++        """
++        if isinstance(value, str):
++            for member in cls:
++                if member._value_.upper() == value.upper():
++                    return member
++        return None
++
+     @overload
+     @classmethod
+     def get(cls, value: str) -> Self | None: ...
+@@ -73,7 +94,7 @@ def get(cls, value: str, default: T | None = None) -> Self | T | None:
+ 
+         """
+         try:
+-            return cls(value.upper())
++            return cls(value)
+         except ValueError:
+             return default
+ 
+diff --git a/src/icalendar/tests/test_enums.py b/src/icalendar/tests/test_enums.py
+index 7978b36fc..4f3574bd6 100644
+--- a/src/icalendar/tests/test_enums.py
++++ b/src/icalendar/tests/test_enums.py
+@@ -113,3 +113,33 @@ def test_constructor_still_raises_for_invalid_value():
+     """Calling the enum directly still raises ValueError for an unknown value."""
+     with pytest.raises(ValueError):
+         enums.PARTSTAT("no-value")
++
++
++def test_constructor_raises_for_non_string_value():
++    """Calling the enum with a non-string value raises ValueError."""
++    with pytest.raises(ValueError):
++        enums.PARTSTAT(123)
++
++
++def test_constructor_is_case_insensitive(enum):
++    """The constructor finds members regardless of the case of the value.
++
++    RFC 5545 section 3.1.1 allows values that are not quoted to be
++    case-insensitive.
++    """
++    for member in enum:
++        assert enum(member.value.lower()) is member
++
++
++def test_lowercase_values_equal_members():
++    """Lowercase values equal the enum members they look up - issue #1840.
++
++    >>> from icalendar.enums import PARTSTAT
++    >>> PARTSTAT("needs-action") == PARTSTAT("NEEDS-ACTION") == PARTSTAT.NEEDS_ACTION
++    True
++    """
++    assert (
++        enums.PARTSTAT("needs-action")
++        == enums.PARTSTAT("NEEDS-ACTION")
++        == enums.PARTSTAT.NEEDS_ACTION
++    )
