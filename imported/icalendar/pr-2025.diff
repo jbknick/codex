@@ -1,0 +1,115 @@
+diff --git a/news/+cli-escape-control-chars.bugfix b/news/+cli-escape-control-chars.bugfix
+new file mode 100644
+index 000000000..3d750f466
+--- /dev/null
++++ b/news/+cli-escape-control-chars.bugfix
+@@ -0,0 +1 @@
++Escape control characters in the output of the ``icalendar`` command line tool. ``ORGANIZER`` and ``ATTENDEE`` values are printed verbatim, so an ``.ics`` file could send terminal escape sequences that rewrite the displayed event or change the terminal title. I used AI to assist me with this change. @alhudz
+diff --git a/src/icalendar/cli.py b/src/icalendar/cli.py
+index b5d94ac49..875b3b161 100755
+--- a/src/icalendar/cli.py
++++ b/src/icalendar/cli.py
+@@ -2,6 +2,7 @@
+ """Utility program that allows user to preview calendar's events"""
+ 
+ import argparse
++import re
+ import sys
+ from datetime import datetime
+ from pathlib import Path
+@@ -11,6 +12,22 @@
+ from icalendar.cal.calendar import Calendar
+ from icalendar.cal.event import Event
+ 
++# C0 controls except tab and newline, DEL, and C1 controls
++_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
++
++
++def _escape_control_chars(text: str) -> str:
++    r"""Escape control characters so the terminal does not interpret them.
++
++    Parameters:
++        text: The text to print.
++
++    Returns:
++        The text with each control character other than tab and newline
++        replaced by its ``\xNN`` escape sequence.
++    """
++    return _CONTROL_CHARS.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
++
+ 
+ def _format_name(address: str) -> str:
+     """Format a display name and email from an address string.
+@@ -74,7 +91,7 @@ def view(event: Event) -> str:
+         end = end.astimezone()
+     end = end.strftime("%c")
+ 
+-    return f"""    Organizer: {organizer}
++    return _escape_control_chars(f"""    Organizer: {organizer}
+     Attendees:
+ {attendees}
+     Summary    : {summary}
+@@ -84,7 +101,7 @@ def view(event: Event) -> str:
+     Location   : {location}
+     Comment    : {comment}
+     Description:
+-{description}"""
++{description}""")
+ 
+ 
+ def main() -> None:
+diff --git a/src/icalendar/tests/test_cli_tool.py b/src/icalendar/tests/test_cli_tool.py
+index 73b232c5a..02cc0b0c2 100644
+--- a/src/icalendar/tests/test_cli_tool.py
++++ b/src/icalendar/tests/test_cli_tool.py
+@@ -1,8 +1,10 @@
+ import unittest
+-from datetime import datetime
++from datetime import date, datetime
+ from zoneinfo import ZoneInfo
+ 
+-from icalendar import Calendar, cli
++import pytest
++
++from icalendar import Calendar, Event, cli
+ 
+ INPUT = """
+ BEGIN:VCALENDAR
+@@ -103,6 +105,37 @@ def test_output_is_proper(self):
+             output += cli.view(event) + "\n\n"
+         assert output == PROPER_OUTPUT
+ 
++    def test_control_characters_are_escaped(self):
++        calendar = Calendar.from_ical(
++            "BEGIN:VEVENT\r\n"
++            "ORGANIZER:mailto:boss\x1b]0;title\x07@example.com\r\n"
++            "ATTENDEE:mailto:a\x1b[2K@example.com\r\n"
++            "SUMMARY:Lunch\u009b2K\r\n"
++            "DTSTART:20220511\r\n"
++            "END:VEVENT\r\n"
++        )
++        output = cli.view(calendar)
++        assert "\x1b" not in output
++        assert "\x07" not in output
++        assert "\x9b" not in output
++        assert "boss\\x1b]0;title\\x07@example.com" in output
++        assert "a\\x1b[2K@example.com" in output
++        assert "Lunch\\x9b2K" in output
++
++
++CONTROL_CHARS = [chr(c) for c in [*range(0x09), *range(0x0B, 0x20), *range(0x7F, 0xA0)]]
++
++
++@pytest.mark.parametrize("char", CONTROL_CHARS, ids=lambda c: f"{ord(c):02x}")
++def test_each_control_character_is_escaped(char):
++    """Every C0 control except tab and newline, DEL and every C1 control is escaped."""
++    event = Event()
++    event.add("dtstart", date(2022, 5, 11))
++    event["organizer"] = f"mailto:a{char}b@example.com"
++    output = cli.view(event)
++    assert char not in output
++    assert f"a\\x{ord(char):02x}b@example.com" in output
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
