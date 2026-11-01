@@ -1,0 +1,201 @@
+diff --git a/news/+vtimezone-rrule-transitions.bugfix b/news/+vtimezone-rrule-transitions.bugfix
+new file mode 100644
+index 000000000..ec6cf0921
+--- /dev/null
++++ b/news/+vtimezone-rrule-transitions.bugfix
+@@ -0,0 +1 @@
++Reject a ``VTIMEZONE`` whose ``RRULE`` produces more than :data:`~icalendar.config.MAX_TIMEZONE_TRANSITIONS_PER_YEAR` transitions within a year, ``100`` by default. Timezones created from a ``VTIMEZONE`` expand its ``RRULE`` from ``DTSTART``, so a calendar with an ``RRULE`` such as ``FREQ=SECONDLY`` in a ``VTIMEZONE`` could exhaust memory and CPU when it was parsed or when a date in that timezone was used. I used AI to assist me with this change. @shamsManna
+diff --git a/src/icalendar/cal/timezone.py b/src/icalendar/cal/timezone.py
+index 65881e264..25790acf0 100644
+--- a/src/icalendar/cal/timezone.py
++++ b/src/icalendar/cal/timezone.py
+@@ -4,10 +4,12 @@
+ 
+ from collections import defaultdict
+ from datetime import date, datetime, timedelta, tzinfo
++from itertools import islice, takewhile
+ 
+ import dateutil.rrule
+ import dateutil.tz
+ 
++from icalendar import config
+ from icalendar.attr import (
+     create_single_property,
+     exdates_property,
+@@ -131,6 +133,49 @@ def _extract_offsets(component: TimezoneDaylight | TimezoneStandard, tzname: str
+             is_dst = 1
+         return is_dst, transitions
+ 
++    def _check_transitions(self) -> None:
++        """Check that the RRULEs of the timezone components are not too frequent.
++
++        Raises:
++            ValueError: If an ``RRULE`` produces more than
++                :data:`~icalendar.config.MAX_TIMEZONE_TRANSITIONS_PER_YEAR`
++                transitions within a year after its first transition.
++        """
++        limit = config.MAX_TIMEZONE_TRANSITIONS_PER_YEAR
++        if limit < 0:
++            return
++        for component in self.walk():
++            if isinstance(component, Timezone) or "DTSTART" not in component:
++                continue
++            ical_rrules = component.get("RRULE", [])
++            if not isinstance(ical_rrules, list):
++                ical_rrules = [ical_rrules]
++            for ical_rrule in ical_rrules:
++                try:
++                    rrule = dateutil.rrule.rrulestr(
++                        ical_rrule.to_ical().decode("utf-8"),
++                        dtstart=to_datetime(component.DTSTART).replace(tzinfo=None),
++                        ignoretz=True,
++                    )
++                    first = next(iter(rrule), None)
++                except ValueError:
++                    # The timezone provider reports invalid rules.
++                    continue
++                if first is None:
++                    continue
++                # A period of a rule is at most a year long, so the year after
++                # the first transition shows how many transitions a year it has.
++                try:
++                    end = first + timedelta(days=400)
++                except OverflowError:
++                    end = datetime.max  # noqa: DTZ901, the rule is floating
++                year = takewhile(lambda dt, end=end: dt < end, rrule)
++                if len(list(islice(year, limit + 1))) > limit:
++                    raise ValueError(
++                        f"Invalid iCalendar VTIMEZONE: RRULE {ical_rrule.to_ical().decode()}"
++                        f" produces more than {limit} transitions within a year."
++                    )
++
+     @staticmethod
+     def _make_unique_tzname(tzname, tznames):
+         """
+@@ -157,6 +202,7 @@ def to_tz(self, tzp: TZP = tzp, lookup_tzid: bool = True):
+             tz = tzp.timezone(self.tz_name)
+             if tz is not None:
+                 return tz
++        self._check_transitions()
+         return tzp.create_timezone(self)
+ 
+     @property
+@@ -180,6 +226,7 @@ def get_transitions(
+         - transition_info = [(TZOFFSETTO, dts_offset, tzname)]
+ 
+         """
++        self._check_transitions()
+         zone = self.tz_name
+         transitions = []
+         dst = {}
+diff --git a/src/icalendar/config.py b/src/icalendar/config.py
+index 86ed19882..5690afe95 100644
+--- a/src/icalendar/config.py
++++ b/src/icalendar/config.py
+@@ -17,6 +17,17 @@
+ .. versionadded:: 7.2.1
+ """
+ 
++MAX_TIMEZONE_TRANSITIONS_PER_YEAR: int = 100
++"""Cap on transitions a ``VTIMEZONE`` ``RRULE`` may produce within a year.
++
++A ``STANDARD`` or ``DAYLIGHT`` component of a ``VTIMEZONE`` usually repeats yearly.
++Timezones created from a ``VTIMEZONE`` expand its ``RRULE`` from ``DTSTART``, so
++an ``RRULE`` such as ``FREQ=SECONDLY`` can exhaust memory or CPU when a date
++in this timezone is used.
++A ``VTIMEZONE`` whose ``RRULE`` produces more transitions within a year is invalid.
++Set to ``-1`` to disable the cap, which should be done only for fully trusted input.
++"""
++
+ 
+ def _clamp_repeat(n: int) -> int:
+     """Return *n* clamped to ``[0, MAX_ALARM_REPEAT]``.
+@@ -62,5 +73,6 @@ def parse_xml(source) -> ElementTree[Element[str]]:
+ 
+ __all__ = [
+     "MAX_ALARM_REPEAT",
++    "MAX_TIMEZONE_TRANSITIONS_PER_YEAR",
+     "parse_xml",
+ ]
+diff --git a/src/icalendar/tests/test_vtimezone_rrule_transitions.py b/src/icalendar/tests/test_vtimezone_rrule_transitions.py
+new file mode 100644
+index 000000000..192295ef2
+--- /dev/null
++++ b/src/icalendar/tests/test_vtimezone_rrule_transitions.py
+@@ -0,0 +1,76 @@
++"""A VTIMEZONE RRULE with too many transitions is invalid.
++
++Timezones created from a VTIMEZONE expand its RRULE from DTSTART.
++A frequent RRULE could exhaust memory or CPU.
++"""
++
++from datetime import datetime
++
++import pytest
++
++import icalendar.config as cfg
++from icalendar import Calendar, Timezone
++
++VTIMEZONE = """BEGIN:VTIMEZONE
++TZID:{tzid}
++BEGIN:STANDARD
++DTSTART:20370101T000000
++RRULE:{rrule}
++TZOFFSETFROM:+0100
++TZOFFSETTO:+0000
++END:STANDARD
++BEGIN:DAYLIGHT
++DTSTART:20370601T000000
++RRULE:FREQ=YEARLY
++TZOFFSETFROM:+0000
++TZOFFSETTO:+0100
++END:DAYLIGHT
++END:VTIMEZONE
++"""
++
++CALENDAR = """BEGIN:VCALENDAR
++{vtimezone}BEGIN:VEVENT
++UID:transitions
++DTSTART;TZID={tzid}:20370701T120000
++END:VEVENT
++END:VCALENDAR
++"""
++
++
++def calendar(tzid: str, rrule: str) -> str:
++    vtimezone = VTIMEZONE.format(tzid=tzid, rrule=rrule)
++    return CALENDAR.format(vtimezone=vtimezone, tzid=tzid).replace("\n", "\r\n")
++
++
++@pytest.mark.parametrize(
++    "rrule",
++    [
++        "FREQ=SECONDLY",
++        "FREQ=MINUTELY",
++        "FREQ=HOURLY",
++        "FREQ=DAILY",
++        "FREQ=YEARLY;BYMONTH=1,2,3,4,5,6,7,8,9,10,11,12;BYHOUR=0,1,2,3,4,5,6,7,8,9",
++    ],
++)
++def test_frequent_rrule_is_invalid(tzp, rrule):
++    """Parsing a VTIMEZONE with too many transitions fails fast."""
++    tzid = f"transitions-{tzp.name}-{rrule}"
++    with pytest.raises(ValueError, match="transitions within a year"):
++        Calendar.from_ical(calendar(tzid, rrule))
++
++
++@pytest.mark.parametrize("rrule", ["FREQ=YEARLY", "FREQ=MONTHLY", "FREQ=WEEKLY"])
++def test_rrule_within_limit_is_used(tzp, rrule):
++    """Timezones with few transitions a year still work."""
++    tzid = f"transitions-{tzp.name}-{rrule}"
++    event = Calendar.from_ical(calendar(tzid, rrule)).events[0]
++    assert event.DTSTART == datetime(2037, 7, 1, 12, tzinfo=event.DTSTART.tzinfo)
++    assert event.DTSTART.tzinfo is not None
++
++
++def test_limit_can_be_disabled(tzp, monkeypatch):
++    """Trusted input can use more transitions."""
++    monkeypatch.setattr(cfg, "MAX_TIMEZONE_TRANSITIONS_PER_YEAR", -1)
++    vtimezone = VTIMEZONE.format(tzid="transitions-disabled", rrule="FREQ=DAILY")
++    timezone = Timezone.from_ical(vtimezone.replace("\n", "\r\n"))
++    assert timezone.to_tz(tzp, lookup_tzid=False) is not None
