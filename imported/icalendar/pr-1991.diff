@@ -1,0 +1,82 @@
+diff --git a/news/876.feature.1 b/news/876.feature.1
+new file mode 100644
+index 000000000..c4460c0f9
+--- /dev/null
++++ b/news/876.feature.1
+@@ -0,0 +1 @@
++Added and documented the property :attr:`vDatetime.ical_value <icalendar.prop.dt.datetime.vDatetime.ical_value>`. I used Claude AI (Sonnet 5.5) to assist me with this change. @Mrbozz
+diff --git a/src/icalendar/prop/dt/datetime.py b/src/icalendar/prop/dt/datetime.py
+index fec1c6795..3e6d68020 100644
+--- a/src/icalendar/prop/dt/datetime.py
++++ b/src/icalendar/prop/dt/datetime.py
+@@ -291,6 +291,38 @@ def from_xcal_element(cls, element: ElementAdapter) -> datetime:
+             dt = tzp.localize_utc(dt)
+         return dt
+ 
++    @property
++    def ical_value(self) -> datetime:
++        """The datetime value of this property.
++
++        Returns:
++            The datetime,timezone-aware if a timezone was set, otherwise its ``tzinfo`` is set to ``None``.
++
++        Examples:
++           The following represents a datetime where ``tzinfo`` is set to ``None``:
++
++            .. code-block:: pycon
++
++                >>> from datetime import datetime, timezone
++                >>> from icalendar import vDatetime
++                >>> naive = vDatetime(datetime(2025, 11, 10, 16, 52))
++                >>> naive.ical_value
++                datetime.datetime(2025, 11, 10, 16, 52)
++                >>> print(naive.ical_value.tzinfo)
++                None
++
++            The following represents a datetime where ``tzinfo`` is set to ``timezone.utc``:
++
++            .. code-block:: pycon
++
++                >>> aware = vDatetime(datetime(2025, 11, 10, 16, 52, tzinfo=timezone.utc))
++                >>> aware.ical_value
++                datetime.datetime(2025, 11, 10, 16, 52, tzinfo=datetime.timezone.utc)
++                >>> print(aware.ical_value.tzinfo)
++                UTC
++        """
++        return self.dt
++
+     @classmethod
+     @from_xcal_wrapper
+     def from_xcal(cls, parser: XCalParser, params: Parameters) -> Self:
+diff --git a/src/icalendar/tests/prop/test_vDatetime.py b/src/icalendar/tests/prop/test_vDatetime.py
+index 332f5ae9d..b51e417d5 100644
+--- a/src/icalendar/tests/prop/test_vDatetime.py
++++ b/src/icalendar/tests/prop/test_vDatetime.py
+@@ -1,4 +1,4 @@
+-from datetime import datetime
++from datetime import datetime, timezone
+ 
+ import pytest
+ 
+@@ -72,3 +72,21 @@ def test_transition(tzp):
+ 
+     dat = vDatetime.from_ical("20101010T000000", "Europe/Vienna")
+     assert vDatetime(dat).to_ical() == b"20101010T000000"
++
++
++def test_ical_value_returns_datetime():
++    """Verifies that ical_value returns the datetime object."""
++    dt = datetime(2025, 11, 10, 16, 52, 0)
++    value = vDatetime(dt)
++
++    assert value.ical_value == dt
++    assert isinstance(value.ical_value, datetime)
++
++
++def test_ical_value_keeps_timezone():
++    """Verifies that ical_value keeps the timezone of the datetime."""
++    dt = datetime(2025, 11, 10, 16, 52, 0, tzinfo=timezone.utc)
++    value = vDatetime(dt)
++
++    assert value.ical_value == dt
++    assert value.ical_value.tzinfo is timezone.utc
