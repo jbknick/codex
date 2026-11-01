@@ -1,0 +1,24 @@
+diff --git a/news/1118.documentation b/news/1118.documentation
+new file mode 100644
+index 000000000..e643918d0
+--- /dev/null
++++ b/news/1118.documentation
+@@ -0,0 +1 @@
++Documented the constructor parameters of :class:`~icalendar.prop.boolean.vBoolean` and clarified the difference between constructor values and :meth:`~icalendar.prop.boolean.vBoolean.from_ical`. AI (DeepSeek-V4.1-Flash-1017) was used to assist with drafting and reviewing the documentation. @TheresaYuki
+diff --git a/src/icalendar/prop/boolean.py b/src/icalendar/prop/boolean.py
+index 12d6c8f86..d88a867a5 100644
+--- a/src/icalendar/prop/boolean.py
++++ b/src/icalendar/prop/boolean.py
+@@ -20,7 +20,11 @@ class vBoolean(int):
+     insensitive.
+ 
+     Parameters:
+-        params: iCalendar property parameters associated with the value.
++        args: Arguments passed to :class:`int` to initialize the value, such as
++            ``True``, ``False``, ``1``, or ``0``. Use :meth:`from_ical` to parse
++            the iCalendar strings ``"TRUE"`` and ``"FALSE"``.
++        params: Optional iCalendar property parameters. Pass this as a keyword
++            argument.
+ 
+     Returns:
+         A new :class:`~icalendar.prop.boolean.vBoolean` instance with the supplied property parameters.
