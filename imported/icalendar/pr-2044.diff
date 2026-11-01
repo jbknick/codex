@@ -1,0 +1,167 @@
+diff --git a/news/2043.bugfix b/news/2043.bugfix
+new file mode 100644
+index 000000000..925476dc0
+--- /dev/null
++++ b/news/2043.bugfix
+@@ -0,0 +1 @@
++Fix the parsing of leap seconds (``time-second = 60`` per RFC 5545): ``vTime.from_ical``, ``vDatetime.from_ical``, ``vTime.parse_jcal_value`` and ``vDatetime.parse_jcal_value`` now clamp the value to 59 like the xCal paths instead of raising a parsing error. @rahul05ranjan
+diff --git a/src/icalendar/prop/dt/datetime.py b/src/icalendar/prop/dt/datetime.py
+index b5d5e0b7e..e4648c7f2 100644
+--- a/src/icalendar/prop/dt/datetime.py
++++ b/src/icalendar/prop/dt/datetime.py
+@@ -137,13 +137,19 @@ def from_ical(ical, timezone=None):
+             raise ValueError(f"Wrong datetime format: {ical}")
+ 
+         try:
++            second = int(ical_value[13:15])
++            if second == 60:
++                # RFC 5545 permits time-second = 00-60 to account for positive
++                # leap seconds. This is wrong but we have no way to represent
++                # this, so we clamp it like the xCal path does.
++                second = 59
+             timetuple = (
+                 int(ical_value[:4]),  # year
+                 int(ical_value[4:6]),  # month
+                 int(ical_value[6:8]),  # day
+                 int(ical_value[9:11]),  # hour
+                 int(ical_value[11:13]),  # minute
+-                int(ical_value[13:15]),  # second
++                second,
+             )
+             if tzinfo:
+                 return tzp.localize(datetime(*timetuple), tzinfo)
+@@ -188,6 +194,11 @@ def parse_jcal_value(cls, jcal: str) -> datetime:
+         utc = jcal.endswith("Z")
+         if utc:
+             jcal = jcal[:-1]
++        # RFC 5545 permits time-second = 00-60 to account for positive
++        # leap seconds. This is wrong but we have no way to represent
++        # this, so we clamp it like the xCal path does.
++        if jcal.endswith(":60"):
++            jcal = jcal[:-2] + "59"
+         try:
+             dt = datetime.strptime(jcal, "%Y-%m-%dT%H:%M:%S")
+         except ValueError as e:
+diff --git a/src/icalendar/prop/dt/time.py b/src/icalendar/prop/dt/time.py
+index aba40c5d9..d248648b3 100644
+--- a/src/icalendar/prop/dt/time.py
++++ b/src/icalendar/prop/dt/time.py
+@@ -206,7 +206,13 @@ def from_ical(ical: str, timezone: str | None | tzinfo = None) -> time:
+             )
+ 
+         try:
+-            timetuple = (int(ical[:2]), int(ical[2:4]), int(ical[4:6]))
++            second = int(ical[4:6])
++            if second == 60:
++                # RFC 5545 permits time-second = 00-60 to account for positive
++                # leap seconds. This is wrong but we have no way to represent
++                # this, so we clamp it like the xCal path does.
++                second = 59
++            timetuple = (int(ical[:2]), int(ical[2:4]), second)
+ 
+             if tzinfo:
+                 return tzp.localize(time(*timetuple), tzinfo)
+@@ -247,11 +253,19 @@ def parse_jcal_value(cls, jcal: str) -> time:
+         match = TIME_JCAL_REGEX.match(jcal)
+         if match is None:
+             raise JCalParsingError("Cannot parse time.", cls, value=jcal)
+-        hour = int(match.group("hour"))
+-        minute = int(match.group("minute"))
+-        second = int(match.group("second"))
+-        utc = bool(match.group("utc"))
+-        return time(hour, minute, second, tzinfo=timezone.utc if utc else None)
++        try:
++            hour = int(match.group("hour"))
++            minute = int(match.group("minute"))
++            second = int(match.group("second"))
++            if second == 60:
++                # RFC 5545 permits time-second = 00-60 to account for positive
++                # leap seconds. This is wrong but we have no way to represent
++                # this, so we clamp it like the xCal path does.
++                second = 59
++            utc = bool(match.group("utc"))
++            return time(hour, minute, second, tzinfo=timezone.utc if utc else None)
++        except ValueError as e:
++            raise JCalParsingError("Cannot parse time.", cls, value=jcal) from e
+ 
+     @classmethod
+     def from_jcal(cls, jcal_property: list) -> Self:
+diff --git a/src/icalendar/tests/prop/test_date_and_time.py b/src/icalendar/tests/prop/test_date_and_time.py
+index f41689dca..83a2ae7d4 100644
+--- a/src/icalendar/tests/prop/test_date_and_time.py
++++ b/src/icalendar/tests/prop/test_date_and_time.py
+@@ -89,3 +89,26 @@ def test_reformed_UTC_serialization(events):
+     # TODO: the UTC parameter is special - it can be present but should not be serialized
+     # How should we treat the parameter?
+     # I think: have it there, but do not serialize it
++
++
++@pytest.mark.parametrize("value", ["20161231T235960Z", "20161231T235960"])
++def test_vdatetime_from_ical_accepts_leap_second(value):
++    """A time-second of 60 is valid RFC 5545 (leap seconds) and is clamped to 59.
++
++    RFC 5545 section 3.3.5 defines time-second as 00-60; the xCal path of
++    vDatetime already clamps 60 to 59. The iCalendar path must accept it too
++    instead of raising ``ValueError: Wrong datetime format``.
++    """
++    parsed = vDatetime.from_ical(value)
++    assert (parsed.year, parsed.hour, parsed.minute, parsed.second) == (
++        2016,
++        23,
++        59,
++        59,
++    )
++
++
++def test_vdatetime_parse_jcal_value_accepts_leap_second():
++    """A jCal time-second of 60 is valid RFC 5545/7265 (leap seconds) and clamps to 59."""
++    parsed = vDatetime.parse_jcal_value("2016-12-31T23:59:60Z")
++    assert (parsed.hour, parsed.minute, parsed.second) == (23, 59, 59)
+diff --git a/src/icalendar/tests/test_time.py b/src/icalendar/tests/test_time.py
+index 610691800..e68fb801e 100644
+--- a/src/icalendar/tests/test_time.py
++++ b/src/icalendar/tests/test_time.py
+@@ -5,7 +5,7 @@
+ import pytest
+ 
+ from icalendar import Calendar
+-from icalendar.error import ICalParsingError
++from icalendar.error import ICalParsingError, JCalParsingError
+ from icalendar.prop.dt.time import vTime
+ 
+ 
+@@ -100,3 +100,34 @@ def test_localized_time_utc(tzp):
+ 
+     assert isinstance(localized, time)
+     assert str(localized.tzinfo) == "UTC"
++
++
++@pytest.mark.parametrize(
++    "value",
++    [
++        "235960Z",
++        "235960",
++        "TZID=America/New_York:235960",
++    ],
++)
++def test_from_ical_accepts_leap_second(value):
++    """A time-second of 60 is valid RFC 5545 (leap seconds) and is clamped to 59.
++
++    RFC 5545 section 3.3.12 defines time-second as 00-60; the xCal path of
++    vTime already clamps 60 to 59. The iCalendar path must accept it too
++    instead of raising ICalParsingError.
++    """
++    parsed = vTime.from_ical(value)
++    assert (parsed.hour, parsed.minute, parsed.second) == (23, 59, 59)
++
++
++def test_parse_jcal_value_accepts_leap_second():
++    """A jCal time-second of 60 is valid RFC 5545/7265 (leap seconds) and clamps to 59."""
++    parsed = vTime.parse_jcal_value("23:59:60Z")
++    assert (parsed.hour, parsed.minute, parsed.second) == (23, 59, 59)
++
++
++def test_parse_jcal_value_still_rejects_out_of_range():
++    """A second beyond the RFC's 00-60 range is rejected."""
++    with pytest.raises(JCalParsingError):
++        vTime.parse_jcal_value("23:59:61")
