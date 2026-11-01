@@ -1,0 +1,611 @@
+diff --git a/news/1926.bugfix b/news/1926.bugfix
+new file mode 100644
+index 000000000..b0ec86904
+--- /dev/null
++++ b/news/1926.bugfix
+@@ -0,0 +1 @@
++Fixed custom time zone resolution in :meth:`Component.from_xcal <icalendar.cal.component.Component.from_xcal>` and :meth:`Component.from_jcal <icalendar.cal.component.Component.from_jcal>` regardless of ``VTIMEZONE`` order, including date lists across daylight saving transitions. AI assisted with this change. @AthosTomich
+diff --git a/src/icalendar/cal/component.py b/src/icalendar/cal/component.py
+index 725342ffd..4a98970d4 100644
+--- a/src/icalendar/cal/component.py
++++ b/src/icalendar/cal/component.py
+@@ -44,7 +44,7 @@
+ from icalendar.tools import is_date
+ 
+ if TYPE_CHECKING:
+-    from collections.abc import Iterable
++    from collections.abc import Iterable, Iterator
+ 
+     from icalendar.compatibility import Self
+ 
+@@ -1056,6 +1056,9 @@ def to_json(self, indent: int | str | None = None) -> str:
+     def from_jcal(cls, jcal: str | list) -> Component:
+         """Create a component from a jCal list.
+ 
++        Timezones defined by ``VTIMEZONE`` components are resolved before parsing
++        events, regardless of their order in the calendar.
++
+         Parameters:
+             jcal: jCal list or JSON string according to :rfc:`7265`.
+ 
+@@ -1100,26 +1103,33 @@ def from_jcal(cls, jcal: str | list) -> Component:
+         """
+         if isinstance(jcal, str):
+             jcal = json.loads(jcal)
+-        # Iterative tree build to avoid RecursionError on deeply nested jCal,
+-        # mirroring the iterative iCal parser (GH #1370). ``_node_from_jcal``
+-        # parses a single component (without its subcomponents); the stack walks
+-        # the subcomponent tree, accumulating the jCal error path ([2, i] per
+-        # nesting level) so error messages match the recursive implementation.
++        # Complete timezone subtrees before parsing their siblings, without
++        # recursing on deeply nested jCal (GH #1370). Keep the original indices
++        # for subcomponent order and error paths.
+         root, root_subcomponents = _node_from_jcal(jcal, cls)
+-        stack: list[tuple[Component, list, list]] = [(root, root_subcomponents, [])]
++        stack: list[
++            tuple[Component, Iterator[tuple[int, Any]], list[int], dict[int, Component]]
++        ] = [(root, _jcal_subcomponents(root_subcomponents), [], {})]
+         while stack:
+-            parent, subcomponents, prefix = stack.pop()
+-            for i, subcomponent in enumerate(subcomponents):
+-                child_prefix = [*prefix, 2, i]
+-                # Prepend the full nesting path so errors match the recursive
+-                # implementation. This also preserves the error value and
+-                # traceback, like the nested context managers did before.
+-                with JCalParsingError.reraise_with_path_added(*child_prefix):
+-                    child, child_subcomponents = _node_from_jcal(
+-                        subcomponent, type(parent)
+-                    )
+-                parent.subcomponents.append(child)
+-                stack.append((child, child_subcomponents, child_prefix))
++            parent, subcomponents, prefix, parsed = stack[-1]
++            item = next(subcomponents, None)
++            if item is None:
++                # Append instead of assigning a new list so children added by
++                # custom constructors are kept.
++                for i in range(len(parsed)):
++                    parent.subcomponents.append(parsed[i])
++                if parent.name == "VTIMEZONE" and "TZID" in parent:
++                    tzp.cache_timezone_component(parent)
++                stack.pop()
++                continue
++            i, subcomponent = item
++            child_prefix = [*prefix, 2, i]
++            with JCalParsingError.reraise_with_path_added(*child_prefix):
++                child, child_subcomponents = _node_from_jcal(subcomponent, type(parent))
++            parsed[i] = child
++            stack.append(
++                (child, _jcal_subcomponents(child_subcomponents), child_prefix, {})
++            )
+         return root
+ 
+     def copy(self, recursive: bool = False) -> Self:
+@@ -1304,6 +1314,9 @@ def to_xcal_element(self, element: Element, /) -> None:
+     def from_xcal(cls, xcal: Element | bytes | Path | BinaryIO) -> list[Self]:
+         """Parse xCal according to :rfc:`6321`.
+ 
++        Timezones defined by ``VTIMEZONE`` components are resolved before parsing
++        events, regardless of their order in the calendar.
++
+         Parameters:
+             xcal: The xCal element or data to parse.
+ 
+@@ -1363,6 +1376,18 @@ def from_xcal(cls, xcal: Element | bytes | Path | BinaryIO) -> list[Self]:
+         return components
+ 
+ 
++def _jcal_subcomponents(subcomponents: list) -> Iterator[tuple[int, Any]]:
++    """Iterate over indexed subcomponents with timezones first."""
++    timezones = []
++    others = []
++    for index, component in enumerate(subcomponents):
++        if isinstance(component, list) and component and component[0] == "vtimezone":
++            timezones.append((index, component))
++        else:
++            others.append((index, component))
++    return iter(timezones + others)
++
++
+ def _node_from_jcal(jcal, starting_cls: type[Component]) -> tuple[Component, list]:
+     """Parse a single jCal component without recursing into subcomponents.
+ 
+diff --git a/src/icalendar/parser/xcal/component.py b/src/icalendar/parser/xcal/component.py
+index 7e24d542d..9e45aad18 100644
+--- a/src/icalendar/parser/xcal/component.py
++++ b/src/icalendar/parser/xcal/component.py
+@@ -8,6 +8,7 @@
+ from icalendar.parser.xcal.adapter import ElementAdapter
+ from icalendar.parser.xcal.base import XCalParser
+ from icalendar.parser.xcal.property import XCalPropertiesParser
++from icalendar.timezone import tzp
+ 
+ if TYPE_CHECKING:
+     from xml.etree.ElementTree import Element
+@@ -116,30 +117,37 @@ def parse_component_from_child(self) -> Component:
+                 parse anything.
+ 
+         """
++        return self._parse_component(self.child)
++
++    def _parse_component(self, element: ElementAdapter) -> Component:
++        """Parse a component, completing timezone children before their siblings."""
+         try:
+-            component_class = self._component_factory.get_component_class(
+-                self.child.tag
+-            )
++            component_class = self._component_factory.get_component_class(element.tag)
+         except InvalidToken as error:
+             raise XCalParsingError(
+                 "The component name must be a valid iCalendar token",
+-                self.child.tag,
+-                self.child,
++                element.tag,
++                element,
+             ) from error
+         component = component_class()
+-        properties = self.child.get_child_with_tag("properties")
++        properties = element.get_child_with_tag("properties")
+         if properties is not None:
+             properties_parser = XCalPropertiesParser(
+                 properties, component, self._types_factory
+             )
+             properties_parser.parse_properties()
+-        components = self.child.get_child_with_tag("components")
++        components = element.get_child_with_tag("components")
+         if components is not None:
+-            components_parser = XCalComponentParser(
+-                components, self._component_factory, self._types_factory
+-            )
+-            while not components_parser.is_finished():
+-                component.add_component(components_parser.parse_component())
++            children = components.children
++            parsed = {}
++            for i in sorted(
++                range(len(children)), key=lambda i: children[i].tag != "vtimezone"
++            ):
++                parsed[i] = self._parse_component(children[i])
++            for i in range(len(children)):
++                component.add_component(parsed[i])
++        if component.name == "VTIMEZONE" and "TZID" in component:
++            tzp.cache_timezone_component(component)
+         return component
+ 
+ 
+diff --git a/src/icalendar/prop/dt/list.py b/src/icalendar/prop/dt/list.py
+index 86ecb057f..255a5d2dd 100644
+--- a/src/icalendar/prop/dt/list.py
++++ b/src/icalendar/prop/dt/list.py
+@@ -144,9 +144,11 @@ def from_xcal(cls, parser: XCalParser, params: Parameters) -> Self:
+         while not parser.is_finished():
+             dts.append(vDDDTypes.from_xcal(parser))
+         if dts:
+-            tz = getattr(dts[0].dt, "tzinfo", None)
++            # All values share the property's TZID, but pytz can use different
++            # tzinfo objects across daylight saving transitions.
++            floating = getattr(dts[0].dt, "tzinfo", None) is None
+             for dt in dts[1:]:
+-                if getattr(dt.dt, "tzinfo", None) != tz:
++                if (getattr(dt.dt, "tzinfo", None) is None) != floating:
+                     raise XCalParsingError(
+                         "Cannot mix floating with UTC", None, parser.element
+                     )
+diff --git a/src/icalendar/tests/calendars/issue_1926_timezones.jcal b/src/icalendar/tests/calendars/issue_1926_timezones.jcal
+new file mode 100644
+index 000000000..9798f2195
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1926_timezones.jcal
+@@ -0,0 +1,72 @@
++["vcalendar",
++  [
++    ["version", {}, "text", "2.0"],
++    ["prodid", {}, "text", "-//icalendar//Issue 1926//EN"]
++  ],
++  [
++    ["vevent",
++      [
++        ["uid", {}, "text", "winter"],
++        ["dtstamp", {}, "date-time", "2025-01-01T00:00:00Z"],
++        ["dtstart", {"tzid": "Custom/Issue1926"}, "date-time", "2025-01-01T09:00:00"],
++        ["dtend", {"tzid": "Custom/Issue1926"}, "date-time", "2025-01-01T10:00:00"],
++        ["rdate", {"tzid": "Custom/Issue1926"}, "date-time", "2025-01-08T09:00:00", "2025-07-08T09:00:00"]
++      ],
++      []
++    ],
++    ["vevent",
++      [
++        ["uid", {}, "text", "summer"],
++        ["dtstamp", {}, "date-time", "2025-01-01T00:00:00Z"],
++        ["dtstart", {"tzid": "Custom/Issue1926"}, "date-time", "2025-07-01T09:00:00"],
++        ["dtend", {"tzid": "Custom/Issue1926"}, "date-time", "2025-07-01T10:00:00"]
++      ],
++      []
++    ],
++    ["vevent",
++      [
++        ["uid", {}, "text", "fixed"],
++        ["dtstamp", {}, "date-time", "2025-01-01T00:00:00Z"],
++        ["dtstart", {"tzid": "Custom/Issue1926Fixed"}, "date-time", "2025-07-01T09:00:00"],
++        ["dtend", {"tzid": "Custom/Issue1926Fixed"}, "date-time", "2025-07-01T10:00:00"]
++      ],
++      []
++    ],
++    ["vtimezone",
++      [["tzid", {}, "text", "Custom/Issue1926"]],
++      [
++        ["daylight",
++          [
++            ["dtstart", {}, "date-time", "2020-03-29T02:00:00"],
++            ["tzoffsetfrom", {}, "utc-offset", "+01:00"],
++            ["tzoffsetto", {}, "utc-offset", "+02:00"],
++            ["rrule", {}, "recur", {"freq": "YEARLY", "bymonth": 3, "byday": "-1SU"}]
++          ],
++          []
++        ],
++        ["standard",
++          [
++            ["dtstart", {}, "date-time", "2020-10-25T03:00:00"],
++            ["tzoffsetfrom", {}, "utc-offset", "+02:00"],
++            ["tzoffsetto", {}, "utc-offset", "+01:00"],
++            ["rrule", {}, "recur", {"freq": "YEARLY", "bymonth": 10, "byday": "-1SU"}]
++          ],
++          []
++        ]
++      ]
++    ],
++    ["vtimezone",
++      [["tzid", {}, "text", "Custom/Issue1926Fixed"]],
++      [
++        ["standard",
++          [
++            ["dtstart", {}, "date-time", "1970-01-01T00:00:00"],
++            ["tzoffsetfrom", {}, "utc-offset", "+05:45"],
++            ["tzoffsetto", {}, "utc-offset", "+05:45"]
++          ],
++          []
++        ]
++      ]
++    ]
++  ]
++]
+diff --git a/src/icalendar/tests/calendars/issue_1926_timezones.xml b/src/icalendar/tests/calendars/issue_1926_timezones.xml
+new file mode 100644
+index 000000000..135eee2f3
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1926_timezones.xml
+@@ -0,0 +1,91 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<icalendar xmlns="urn:ietf:params:xml:ns:icalendar-2.0">
++  <vcalendar>
++    <properties>
++      <version><text>2.0</text></version>
++      <prodid><text>-//icalendar//Issue 1926//EN</text></prodid>
++    </properties>
++    <components>
++      <vevent>
++        <properties>
++          <uid><text>winter</text></uid>
++          <dtstamp><date-time>2025-01-01T00:00:00Z</date-time></dtstamp>
++          <dtstart>
++            <parameters><tzid><text>Custom/Issue1926</text></tzid></parameters>
++            <date-time>2025-01-01T09:00:00</date-time>
++          </dtstart>
++          <dtend>
++            <parameters><tzid><text>Custom/Issue1926</text></tzid></parameters>
++            <date-time>2025-01-01T10:00:00</date-time>
++          </dtend>
++          <rdate>
++            <parameters><tzid><text>Custom/Issue1926</text></tzid></parameters>
++            <date-time>2025-01-08T09:00:00</date-time>
++            <date-time>2025-07-08T09:00:00</date-time>
++          </rdate>
++        </properties>
++      </vevent>
++      <vevent>
++        <properties>
++          <uid><text>summer</text></uid>
++          <dtstamp><date-time>2025-01-01T00:00:00Z</date-time></dtstamp>
++          <dtstart>
++            <parameters><tzid><text>Custom/Issue1926</text></tzid></parameters>
++            <date-time>2025-07-01T09:00:00</date-time>
++          </dtstart>
++          <dtend>
++            <parameters><tzid><text>Custom/Issue1926</text></tzid></parameters>
++            <date-time>2025-07-01T10:00:00</date-time>
++          </dtend>
++        </properties>
++      </vevent>
++      <vevent>
++        <properties>
++          <uid><text>fixed</text></uid>
++          <dtstamp><date-time>2025-01-01T00:00:00Z</date-time></dtstamp>
++          <dtstart>
++            <parameters><tzid><text>Custom/Issue1926Fixed</text></tzid></parameters>
++            <date-time>2025-07-01T09:00:00</date-time>
++          </dtstart>
++          <dtend>
++            <parameters><tzid><text>Custom/Issue1926Fixed</text></tzid></parameters>
++            <date-time>2025-07-01T10:00:00</date-time>
++          </dtend>
++        </properties>
++      </vevent>
++      <vtimezone>
++        <properties><tzid><text>Custom/Issue1926</text></tzid></properties>
++        <components>
++          <daylight>
++            <properties>
++              <dtstart><date-time>2020-03-29T02:00:00</date-time></dtstart>
++              <tzoffsetfrom><utc-offset>+01:00</utc-offset></tzoffsetfrom>
++              <tzoffsetto><utc-offset>+02:00</utc-offset></tzoffsetto>
++              <rrule><recur><freq>YEARLY</freq><bymonth>3</bymonth><byday>-1SU</byday></recur></rrule>
++            </properties>
++          </daylight>
++          <standard>
++            <properties>
++              <dtstart><date-time>2020-10-25T03:00:00</date-time></dtstart>
++              <tzoffsetfrom><utc-offset>+02:00</utc-offset></tzoffsetfrom>
++              <tzoffsetto><utc-offset>+01:00</utc-offset></tzoffsetto>
++              <rrule><recur><freq>YEARLY</freq><bymonth>10</bymonth><byday>-1SU</byday></recur></rrule>
++            </properties>
++          </standard>
++        </components>
++      </vtimezone>
++      <vtimezone>
++        <properties><tzid><text>Custom/Issue1926Fixed</text></tzid></properties>
++        <components>
++          <standard>
++            <properties>
++              <dtstart><date-time>1970-01-01T00:00:00</date-time></dtstart>
++              <tzoffsetfrom><utc-offset>+05:45</utc-offset></tzoffsetfrom>
++              <tzoffsetto><utc-offset>+05:45</utc-offset></tzoffsetto>
++            </properties>
++          </standard>
++        </components>
++      </vtimezone>
++    </components>
++  </vcalendar>
++</icalendar>
+diff --git a/src/icalendar/tests/rfc_6321_xcal/prop/test_dt_list.py b/src/icalendar/tests/rfc_6321_xcal/prop/test_dt_list.py
+index eb19246d0..5f103ff70 100644
+--- a/src/icalendar/tests/rfc_6321_xcal/prop/test_dt_list.py
++++ b/src/icalendar/tests/rfc_6321_xcal/prop/test_dt_list.py
+@@ -339,6 +339,32 @@ def test_cannot_mix_utc_and_tzid_times(dts):
+         )
+ 
+ 
++@pytest.mark.parametrize("property_name", ["rdate", "exdate"])
++@pytest.mark.parametrize("reverse", [False, True], ids=["winter-first", "summer-first"])
++def test_tzid_dates_can_span_daylight_saving_time(property_name, reverse, tzp):
++    """One TZID can have different UTC offsets within the same date list."""
++    values = [
++        ["date-time", "2025-01-08T09:00:00"],
++        ["date-time", "2025-07-08T09:00:00"],
++    ]
++    offsets = [timedelta(hours=1), timedelta(hours=2)]
++    if reverse:
++        values.reverse()
++        offsets.reverse()
++    xml = list2xml(
++        [
++            property_name,
++            ["parameters", ["tzid", ["text", "Europe/Berlin"]]],
++            *values,
++        ]
++    )
++
++    result = vDDDLists.from_xcal(xml)
++
++    assert result.params["TZID"] == "Europe/Berlin"
++    assert [value.dt.utcoffset() for value in result.dts] == offsets
++
++
+ def test_get_empty_dts():
+     """We should not error if empty"""
+     assert vDDDLists.from_xcal(list2xml(["x-prop"])).dts == []
+diff --git a/src/icalendar/tests/test_issue_1926_timezone_order.py b/src/icalendar/tests/test_issue_1926_timezone_order.py
+new file mode 100644
+index 000000000..46b22990c
+--- /dev/null
++++ b/src/icalendar/tests/test_issue_1926_timezone_order.py
+@@ -0,0 +1,202 @@
++"""Resolve custom timezones before parsing dates in jCal and xCal."""
++
++import json
++from datetime import datetime, timedelta, timezone
++from io import BytesIO
++from pathlib import Path
++from xml.etree import ElementTree as ET
++
++import pytest
++
++from icalendar import Calendar, Component, Event, config
++from icalendar.error import JCalParsingError, XCalParsingError
++
++TZID = "Custom/Issue1926"
++FIXED_TZID = "Custom/Issue1926Fixed"
++
++
++@pytest.fixture(params=["jcal", "xml"])
++def calendar_input(request, tzp):
++    """Read native input with a fresh timezone cache for every test."""
++    # The tzp fixture has module scope; each case needs an empty cache.
++    tzp.use(tzp.name)
++    # The calendars fixture would parse the input and populate the cache.
++    path = Path(__file__).parent / "calendars" / f"issue_1926_timezones.{request.param}"
++    data = path.read_bytes()
++    yield (
++        json.loads(data)
++        if request.param == "jcal"
++        else config.parse_xml(BytesIO(data)).getroot()
++    )
++    tzp.use(tzp.name)
++
++
++def _children(data):
++    return (
++        data[2] if isinstance(data, list) else data.find("{*}vcalendar/{*}components")
++    )
++
++
++def _parse(data):
++    if isinstance(data, (str, list)):
++        return Calendar.from_jcal(data)
++    return Calendar.from_xcal(data)[0]
++
++
++def _serialize(data):
++    return json.dumps(data) if isinstance(data, list) else ET.tostring(data)
++
++
++@pytest.mark.parametrize("position", [0, 1, 3], ids=["before", "between", "after"])
++def test_timezone_order_does_not_change_dates(calendar_input, tzp, position):
++    """Resolve both custom timezones without a preceding from_ical call."""
++    children = _children(calendar_input)
++    events, timezones = list(children[:3]), list(children[3:])
++    children[:] = events[:position] + timezones + events[position:]
++    assert tzp.timezone(TZID) is None
++    assert tzp.timezone(FIXED_TZID) is None
++
++    calendar = _parse(calendar_input)
++
++    expected = [
++        (timedelta(hours=1), datetime(2025, 1, 1, 8, tzinfo=timezone.utc)),
++        (timedelta(hours=2), datetime(2025, 7, 1, 7, tzinfo=timezone.utc)),
++        (
++            timedelta(hours=5, minutes=45),
++            datetime(2025, 7, 1, 3, 15, tzinfo=timezone.utc),
++        ),
++    ]
++    for event, (offset, utc_start) in zip(calendar.events, expected, strict=True):
++        assert event.start.utcoffset() == offset
++        assert event.end.utcoffset() == offset
++        assert event.start.astimezone(timezone.utc) == utc_start
++        assert event.end.astimezone(timezone.utc) == utc_start + timedelta(hours=1)
++
++
++@pytest.mark.parametrize("position", [0, 1, 3], ids=["before", "between", "after"])
++def test_parsing_preserves_input_and_component_order(calendar_input, position):
++    """Timezone priority changes neither the input nor the returned order."""
++    children = _children(calendar_input)
++    events, timezones = list(children[:3]), list(children[3:])
++    children[:] = events[:position] + timezones + events[position:]
++    original = _serialize(calendar_input)
++
++    calendar = _parse(calendar_input)
++
++    assert _serialize(calendar_input) == original
++    assert [component.name for component in calendar.subcomponents] == (
++        ["VEVENT"] * position + ["VTIMEZONE"] * 2 + ["VEVENT"] * (3 - position)
++    )
++    assert [event.uid for event in calendar.events] == ["winter", "summer", "fixed"]
++    assert [str(tz["TZID"]) for tz in calendar.timezones] == [TZID, FIXED_TZID]
++
++
++def test_timezone_parameters_are_preserved(calendar_input):
++    """Keep the original TZID on event date properties."""
++    calendar = _parse(calendar_input)
++
++    for event, tzid in zip(calendar.events, [TZID, TZID, FIXED_TZID], strict=True):
++        assert event["DTSTART"].params["TZID"] == tzid
++        assert event["DTEND"].params["TZID"] == tzid
++
++
++def test_rdates_span_daylight_saving_time(calendar_input):
++    """Resolve recurrence dates on both sides of a daylight saving transition."""
++    calendar = _parse(calendar_input)
++    rdate = calendar.events[0]["RDATE"]
++
++    assert [value.dt.utcoffset() for value in rdate.dts] == [
++        timedelta(hours=1),
++        timedelta(hours=2),
++    ]
++    assert rdate.params["TZID"] == TZID
++    assert [value.dt.astimezone(timezone.utc) for value in rdate.dts] == [
++        datetime(2025, 1, 8, 8, tzinfo=timezone.utc),
++        datetime(2025, 7, 8, 7, tzinfo=timezone.utc),
++    ]
++
++
++def test_serialized_input_resolves_timezones(calendar_input):
++    """JSON strings and XML bytes use the same timezone preparation."""
++    calendar = _parse(_serialize(calendar_input))
++    assert calendar.events[0].start.utcoffset() == timedelta(hours=1)
++    assert calendar.events[1].start.utcoffset() == timedelta(hours=2)
++
++
++def test_standalone_timezone_is_registered(calendar_input, tzp):
++    """A fully parsed timezone is available to subsequent component parsing."""
++    children = _children(calendar_input)
++    timezone_component = _parse(children[3])
++    assert timezone_component.name == "VTIMEZONE"
++    assert tzp.timezone(TZID) is not None
++    assert _parse(children[0]).start.utcoffset() == timedelta(hours=1)
++
++
++def test_timezone_without_tzid_is_not_registered(calendar_input):
++    """Incomplete timezones without TZID remain parseable, as in iCalendar."""
++    children = _children(calendar_input)
++    timezone_component = children[4]
++    if isinstance(timezone_component, list):
++        timezone_component[1] = []
++    else:
++        properties = timezone_component.find("{*}properties")
++        properties.remove(properties.find("{*}tzid"))
++    children[:] = [timezone_component]
++    assert "TZID" not in _parse(calendar_input).timezones[0]
++
++
++def test_timezone_error_keeps_original_location(calendar_input):
++    """Processing a late timezone first must preserve its original error path."""
++    timezone_component = _children(calendar_input)[4]
++    if isinstance(calendar_input, list):
++        timezone_component[2][0][0] = "invalid name"
++        with pytest.raises(JCalParsingError) as error:
++            _parse(calendar_input)
++        assert error.value.path == [2, 4, 2, 0, 0]
++    else:
++        timezone_component.find("{*}components/{*}standard").tag = "invalid name"
++        with pytest.raises(XCalParsingError) as error:
++            _parse(calendar_input)
++        assert error.value.element.get_xpath() == (
++            "/icalendar/vcalendar[1]/components[1]/vtimezone[2]/components[1]"
++            "/invalid name[1]"
++        )
++
++
++class ComponentWithDefaults(Component):
++    """A registered component whose constructor supplies a default child."""
++
++    name = "X-ISSUE-1926-DEFAULTS"
++
++    def __init__(self):
++        super().__init__()
++        self.default_event = Event()
++        self.default_event.add("uid", "default")
++        self.add_component(self.default_event)
++        self.original_subcomponents = self.subcomponents
++
++
++@pytest.mark.parametrize("format_name", ["jcal", "xcal"])
++@pytest.mark.parametrize("uids", [[], ["first", "second"]], ids=["empty", "children"])
++def test_preserve_constructor_subcomponents(format_name, uids):
++    """Append parsed children without replacing a custom component's defaults."""
++    Calendar.register(ComponentWithDefaults)
++    component_name = ComponentWithDefaults.name.lower()
++    if format_name == "jcal":
++        children = [["vevent", [["uid", {}, "text", uid]], []] for uid in uids]
++        data = ["vcalendar", [], [[component_name, [], children]]]
++    else:
++        data = ET.Element("vcalendar")
++        container = ET.SubElement(ET.SubElement(data, "components"), component_name)
++        children = ET.SubElement(container, "components")
++        for uid in uids:
++            event = ET.SubElement(children, "vevent")
++            properties = ET.SubElement(event, "properties")
++            ET.SubElement(ET.SubElement(properties, "uid"), "text").text = uid
++
++    component = _parse(data).subcomponents[0]
++
++    assert isinstance(component, ComponentWithDefaults)
++    assert component.subcomponents is component.original_subcomponents
++    assert component.subcomponents[0] is component.default_event
++    assert [event.uid for event in component.subcomponents] == ["default", *uids]
