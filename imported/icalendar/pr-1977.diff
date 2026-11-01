@@ -1,0 +1,531 @@
+diff --git a/docs/how-to/index.rst b/docs/how-to/index.rst
+index 93ded7eec..22f08371b 100644
+--- a/docs/how-to/index.rst
++++ b/docs/how-to/index.rst
+@@ -9,6 +9,7 @@ How to guides
+     configure
+     upgrade
+     usage
++    parse
+     parse-errors
+     attendees
+     custom-components
+diff --git a/docs/how-to/parse.rst b/docs/how-to/parse.rst
+new file mode 100644
+index 000000000..62e66b361
+--- /dev/null
++++ b/docs/how-to/parse.rst
+@@ -0,0 +1,95 @@
++.. _how-to-parse:
++
++=========================
++Parse any calendar format
++=========================
++
++This chapter describes how to parse calendar data when you do not know in advance whether it is :term:`iCalendar`, :term:`jCal`, or :term:`xCal`.
++
++icalendar supports three calendar formats, each with its own parser:
++
++-   iCalendar, as specified in :rfc:`5545`, parsed by :meth:`Calendar.from_ical() <icalendar.cal.calendar.Calendar.from_ical>`
++-   jCal, a JSON representation, as specified in :rfc:`7265`, parsed by :meth:`Calendar.from_jcal() <icalendar.cal.component.Component.from_jcal>`
++-   xCal, an XML representation, as specified in :rfc:`6321`, parsed by :meth:`Calendar.from_xcal() <icalendar.cal.component.Component.from_xcal>`
++
++The function :func:`~icalendar.cal.calendar.parse` detects the format for you and calls the matching parser.
++
++
++Parse :class:`bytes`
++====================
++
++Pass the data as :class:`bytes`.
++
++.. code-block:: pycon
++
++    >>> from icalendar import parse
++    >>> data = b'["vcalendar", [["prodid", {}, "text", "example"]], []]'
++    >>> calendar = parse(data)
++    >>> calendar["PRODID"]
++    vText(b'example')
++
++The format is detected from the first character, ignoring whitespace and a byte order mark:
++
++-   ``B`` or ``b``, as in ``BEGIN:VCALENDAR``, means iCalendar.
++-   ``[`` means jCal.
++-   ``<`` means xCal.
++
++The data is passed to the parser unchanged, so :func:`~icalendar.cal.calendar.parse` accepts what the matching parser accepts.
++
++If the format cannot be detected, :func:`~icalendar.cal.calendar.parse` raises :class:`~icalendar.error.UnknownCalendarFormat`.
++
++.. code-block:: pycon
++
++    >>> parse(b"not a calendar")
++    Traceback (most recent call last):
++      ...
++    icalendar.error.UnknownCalendarFormat: Could not detect the calendar format: expected iCal, jCal or xCal data, but the data starts with b'not a cale'.
++
++
++Parse a file
++============
++
++Pass a :class:`~pathlib.Path` to read and parse a file.
++
++.. code-block:: pycon
++
++    >>> from pathlib import Path
++    >>> calendar = parse(Path("src/icalendar/tests/calendars/example.ics"))
++    >>> len(calendar.events)
++    3
++
++You can also pass a file that you opened in binary mode.
++
++.. code-block:: pycon
++
++    >>> with open("src/icalendar/tests/calendars/example.ics", "rb") as file:
++    ...     calendar = parse(file)
++    >>> len(calendar.events)
++    3
++
++A file opened in text mode returns :class:`str` instead of :class:`bytes`, so :func:`~icalendar.cal.calendar.parse` raises a :class:`TypeError`.
++
++
++Parse several calendars
++=======================
++
++iCalendar and xCal data may contain several calendars.
++jCal data always contains one calendar.
++Most data contains only one calendar.
++
++By default, :func:`~icalendar.cal.calendar.parse` returns one calendar.
++If the data contains more than one calendar, returning only one of them would lose the others, so it raises :class:`~icalendar.error.CalendarInformationLost`.
++If the data contains no calendars, it raises :class:`~icalendar.error.NoCalendarsFound`.
++
++To get all calendars as a list, pass ``multiple=True``.
++
++The example below demonstrates the iCalendar stream.
++The ``ical`` variable contains only one calendar.
++``ical + ical`` parses into two calendars.
++
++.. code-block:: pycon
++
++    >>> ical = b"BEGIN:VCALENDAR\r\nPRODID:example\r\nEND:VCALENDAR\r\n"
++    >>> calendars = parse(ical + ical, multiple=True)
++    >>> len(calendars)
++    2
+diff --git a/news/1917.feature b/news/1917.feature
+new file mode 100644
+index 000000000..db995d957
+--- /dev/null
++++ b/news/1917.feature
+@@ -0,0 +1 @@
++Added :func:`icalendar.parse <icalendar.cal.calendar.parse>`, which detects whether data is iCalendar, jCal, or xCal and parses it into calendars. It accepts :class:`bytes`, a :class:`~pathlib.Path`, or a binary file. Added the errors :class:`~icalendar.error.UnknownCalendarFormat`, :class:`~icalendar.error.NoCalendarsFound`, and :class:`~icalendar.error.CalendarInformationLost`. Added the how-to guide :doc:`/how-to/parse`. I used Claude Code as a learning aid to explain the codebase, review my code, and draft the tests and documentation, then reviewed and tested the result. @EyalHefer
+diff --git a/src/icalendar/__init__.py b/src/icalendar/__init__.py
+index 919dac284..3a404c699 100644
+--- a/src/icalendar/__init__.py
++++ b/src/icalendar/__init__.py
+@@ -17,6 +17,7 @@
+     TimezoneDaylight,
+     TimezoneStandard,
+     Todo,
++    parse,
+ )
+ from icalendar.enums import (
+     BUSYTYPE,
+@@ -34,6 +35,7 @@
+ )
+ from icalendar.error import (
+     BrokenCalendarProperty,
++    CalendarInformationLost,
+     ComponentEndMissing,
+     ComponentStartMissing,
+     FeatureWillBeRemovedInFutureVersion,
+@@ -45,6 +47,8 @@
+     InvalidToken,
+     JCalParsingError,
+     LocalTimezoneMissing,
++    NoCalendarsFound,
++    UnknownCalendarFormat,
+     XCalParsingError,
+ )
+ 
+@@ -124,6 +128,7 @@
+     "Available",
+     "BrokenCalendarProperty",
+     "Calendar",
++    "CalendarInformationLost",
+     "Component",
+     "ComponentEndMissing",
+     "ComponentFactory",
+@@ -144,16 +149,19 @@
+     "LazyCalendar",
+     "LocalTimezoneMissing",
+     "NFields",
++    "NoCalendarsFound",
+     "Parameters",
+     "Timezone",
+     "TimezoneDaylight",
+     "TimezoneStandard",
+     "Todo",
+     "TypesFactory",
++    "UnknownCalendarFormat",
+     "XCalParsingError",
+     "__version__",
+     "__version_tuple__",
+     "is_utc",
++    "parse",
+     "q_join",
+     "q_split",
+     "use_pytz",
+diff --git a/src/icalendar/cal/__init__.py b/src/icalendar/cal/__init__.py
+index 0a8279344..2cdbcbb3e 100644
+--- a/src/icalendar/cal/__init__.py
++++ b/src/icalendar/cal/__init__.py
+@@ -7,7 +7,7 @@
+ from .alarm import Alarm
+ from .availability import Availability
+ from .available import Available
+-from .calendar import Calendar
++from .calendar import Calendar, parse
+ from .component import Component
+ from .component_factory import ComponentFactory
+ from .event import Event
+@@ -32,4 +32,5 @@
+     "TimezoneDaylight",
+     "TimezoneStandard",
+     "Todo",
++    "parse",
+ ]
+diff --git a/src/icalendar/cal/calendar.py b/src/icalendar/cal/calendar.py
+index 7fff6b561..685ff25de 100644
+--- a/src/icalendar/cal/calendar.py
++++ b/src/icalendar/cal/calendar.py
+@@ -2,8 +2,10 @@
+ 
+ from __future__ import annotations
+ 
++import re
+ import uuid
+ from datetime import timedelta
++from pathlib import Path
+ from typing import TYPE_CHECKING, Literal, cast, overload
+ 
+ from icalendar.attr import (
+@@ -21,14 +23,19 @@
+ from icalendar.cal.component import Component
+ from icalendar.cal.examples import get_example
+ from icalendar.cal.timezone import Timezone
+-from icalendar.error import IncompleteComponent
++from icalendar.error import (
++    CalendarInformationLost,
++    IncompleteComponent,
++    NoCalendarsFound,
++    UnknownCalendarFormat,
++)
+ from icalendar.parser.ical.calendar import CalendarIcalParser
+ from icalendar.version import __version__
+ 
+ if TYPE_CHECKING:
+     from collections.abc import Iterable, Sequence
+     from datetime import date, datetime
+-    from pathlib import Path
++    from typing import BinaryIO
+ 
+     from icalendar.cal import (
+         Availability,
+@@ -697,4 +704,103 @@ def validate(self):
+             )
+ 
+ 
+-__all__ = ["Calendar"]
++FORMAT_START = re.compile(rb"(?:\xef\xbb\xbf|\xff\xfe|\xfe\xff)?[\s\x00]*([Bb\[<])")
++
++
++@overload
++def parse(
++    source: bytes | Path | BinaryIO, multiple: Literal[False] = False
++) -> Calendar: ...
++@overload
++def parse(
++    source: bytes | Path | BinaryIO, multiple: Literal[True]
++) -> list[Calendar]: ...
++
++
++def parse(
++    source: bytes | Path | BinaryIO, multiple: bool = False
++) -> Calendar | list[Calendar]:
++    r"""Parse iCalendar, jCal, or xCal data into calendars.
++
++    The format is detected from the first character of the data, ignoring
++    whitespace and a byte order mark: ``B`` or ``b`` for iCalendar
++    (:rfc:`5545`), ``[`` for jCal (:rfc:`7265`), and ``<`` for xCal (:rfc:`6321`).
++    The data is passed to the parser unchanged.
++    See :ref:`how-to-parse` for more examples.
++
++    Parameters:
++        source: The data to parse, as :class:`bytes`, a :class:`~pathlib.Path`
++            to a file, or a file opened in binary mode.
++        multiple: If ``True``, returns a list of calendars.
++            If ``False``, returns a single calendar.
++
++    Returns:
++        A calendar, or a list of calendars if ``multiple`` is ``True``.
++
++    Raises:
++        TypeError: If the data is not :class:`bytes`, for example, because
++            a file was opened in text mode.
++        ~icalendar.error.UnknownCalendarFormat: If the format cannot be detected.
++        ~icalendar.error.NoCalendarsFound: If ``multiple`` is ``False`` and the data
++            contains no calendars.
++        ~icalendar.error.CalendarInformationLost: If ``multiple`` is ``False`` and the
++            data contains more than one calendar.
++
++    Example:
++
++        Parse iCalendar and jCal data with the same function.
++
++        .. code-block:: pycon
++
++            >>> from icalendar import parse
++            >>> ical = b"BEGIN:VCALENDAR\r\nPRODID:example\r\nEND:VCALENDAR\r\n"
++            >>> parse(ical)["PRODID"]
++            vText(b'example')
++            >>> jcal = b'["vcalendar", [["prodid", {}, "text", "example"]], []]'
++            >>> parse(jcal)["PRODID"]
++            vText(b'example')
++
++        Use ``multiple=True`` to get a list of all calendars.
++
++        .. code-block:: pycon
++
++            >>> calendars = parse(ical + ical, multiple=True)
++            >>> len(calendars)
++            2
++    """
++    if isinstance(source, (bytes, str)):
++        data = source
++    elif isinstance(source, Path):
++        data = source.read_bytes()
++    else:
++        data = source.read()
++    if not isinstance(data, bytes):
++        raise TypeError(
++            f"Expected bytes, but got {type(data).__name__}. "
++            'Open files in binary mode with "rb".'
++        )
++    match = FORMAT_START.match(data)
++    first = b"" if match is None else match.group(1)
++    if first.upper() == b"B":
++        calendars = Calendar.from_ical(data, multiple=True)
++    elif first == b"[":
++        calendars = [cast("Calendar", Calendar.from_jcal(data.decode("utf-8-sig")))]
++    elif first == b"<":
++        calendars = Calendar.from_xcal(data)
++    else:
++        raise UnknownCalendarFormat(
++            f"Could not detect the calendar format: expected iCal, jCal or xCal data, "
++            f"but the data starts with {data[:10]!r}."
++        )
++    if multiple:
++        return calendars
++    if len(calendars) > 1:
++        raise CalendarInformationLost(
++            "There are multiple calendars, please use multiple=True."
++        )
++    if len(calendars) == 0:
++        raise NoCalendarsFound("No calendars found.")
++    return calendars[0]
++
++
++__all__ = ["Calendar", "parse"]
+diff --git a/src/icalendar/error.py b/src/icalendar/error.py
+index 3c10b6c46..3d2bbe026 100644
+--- a/src/icalendar/error.py
++++ b/src/icalendar/error.py
+@@ -65,6 +65,25 @@ class BrokenCalendarProperty(InvalidCalendar):
+     """
+ 
+ 
++class UnknownCalendarFormat(InvalidCalendar):
++    """The data is not in a calendar format that icalendar can detect.
++
++    The supported formats are iCalendar, jCal and xCal.
++    """
++
++
++class NoCalendarsFound(InvalidCalendar):
++    """The data was parsed, but it contains no calendars."""
++
++
++class CalendarInformationLost(ValueError):
++    """The data contains several calendars, but only one was requested.
++
++    Returning one of them would lose the others.
++    Use ``multiple=True`` to get all calendars as a list.
++    """
++
++
+ class IncompleteComponent(ValueError):
+     """The component is missing attributes.
+ 
+@@ -399,6 +418,7 @@ def __init__(
+ 
+ __all__ = [
+     "BrokenCalendarProperty",
++    "CalendarInformationLost",
+     "ComponentEndMissing",
+     "ComponentStartMissing",
+     "FeatureWillBeRemovedInFutureVersion",
+@@ -409,5 +429,7 @@ def __init__(
+     "InvalidToken",
+     "JCalParsingError",
+     "LocalTimezoneMissing",
++    "NoCalendarsFound",
++    "UnknownCalendarFormat",
+     "XCalParsingError",
+ ]
+diff --git a/src/icalendar/tests/test_issue_1917_parse.py b/src/icalendar/tests/test_issue_1917_parse.py
+new file mode 100644
+index 000000000..045e7ee79
+--- /dev/null
++++ b/src/icalendar/tests/test_issue_1917_parse.py
+@@ -0,0 +1,141 @@
++"""Tests for icalendar.parse, which detects iCal, jCal and xCal automatically.
++
++See https://github.com/collective/icalendar/issues/1917
++"""
++
++from xml.etree.ElementTree import ParseError
++
++import pytest
++
++from icalendar import (
++    Calendar,
++    CalendarInformationLost,
++    NoCalendarsFound,
++    UnknownCalendarFormat,
++    parse,
++)
++
++ICAL = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:test\r\nEND:VCALENDAR\r\n"
++JCAL = b'["vcalendar", [["version", {}, "text", "2.0"], ["prodid", {}, "text", "test"]], []]'
++XCAL = (
++    b'<?xml version="1.0"?>'
++    b'<icalendar xmlns="urn:ietf:params:xml:ns:icalendar-2.0"><vcalendar><properties>'
++    b"<version><text>2.0</text></version><prodid><text>test</text></prodid>"
++    b"</properties></vcalendar></icalendar>"
++)
++
++
++@pytest.fixture(params=[ICAL, JCAL, XCAL], ids=["ical", "jcal", "xcal"])
++def data(request):
++    """Valid data for each supported format."""
++    return request.param
++
++
++@pytest.fixture
++def data_path(data, tmp_path):
++    """A path to a file that contains the data."""
++    path = tmp_path / "calendar.ics"
++    path.write_bytes(data)
++    return path
++
++
++@pytest.fixture
++def data_file(data_path):
++    """The data as a file opened in binary mode."""
++    with data_path.open("rb") as file:
++        yield file
++
++
++def test_parse_bytes(data):
++    """Each format is detected and parsed into a single calendar."""
++    calendar = parse(data)
++    assert isinstance(calendar, Calendar)
++    assert calendar["PRODID"] == "test"
++
++
++def test_parse_path(data_path):
++    """A path to a file is read and parsed."""
++    assert parse(data_path)["PRODID"] == "test"
++
++
++def test_parse_open_file(data_file):
++    """An open binary file is read and parsed."""
++    assert parse(data_file)["PRODID"] == "test"
++
++
++def test_parse_multiple_returns_list(data):
++    """With multiple=True, each format returns a list of calendars."""
++    calendars = parse(data, multiple=True)
++    assert isinstance(calendars, list)
++    assert len(calendars) == 1
++    assert calendars[0]["PRODID"] == "test"
++
++
++def test_leading_whitespace_in_jcal_is_ignored():
++    """The jCal parser accepts whitespace before the data."""
++    assert parse(b"  \n" + JCAL)["PRODID"] == "test"
++
++
++@pytest.mark.parametrize(
++    ("data", "error"),
++    [(ICAL, ValueError), (XCAL, ParseError)],
++    ids=["ical", "xcal"],
++)
++def test_data_is_passed_to_the_parser_unchanged(data, error):
++    """Whitespace is not removed, so parsers that reject it raise their error."""
++    with pytest.raises(error):
++        parse(b"  \n" + data)
++
++
++def test_utf8_bom_is_ignored(data):
++    """A UTF-8 byte order mark before the data does not affect format detection."""
++    assert parse(b"\xef\xbb\xbf" + data)["PRODID"] == "test"
++
++
++@pytest.mark.parametrize(
++    ("bom", "encoding"),
++    [(b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")],
++    ids=["little-endian", "big-endian"],
++)
++def test_utf16_xcal(bom, encoding):
++    """UTF-16 xCal in either byte order is detected and parsed."""
++    assert parse(bom + XCAL.decode().encode(encoding))["PRODID"] == "test"
++
++
++def test_lowercase_ical_is_detected():
++    """iCalendar data that starts with a lowercase begin is detected."""
++    assert parse(ICAL.lower())["PRODID"] == "test"
++
++
++@pytest.mark.parametrize("data", [b"", b"   ", b"not a calendar"])
++def test_unknown_format_raises_error(data):
++    """Data with no detectable format raises an error that shows its start."""
++    with pytest.raises(UnknownCalendarFormat, match="Could not detect"):
++        parse(data)
++
++
++def test_no_calendars_raises_error():
++    """Data without any calendar raises an error."""
++    with pytest.raises(NoCalendarsFound, match="No calendars found"):
++        parse(b'<icalendar xmlns="urn:ietf:params:xml:ns:icalendar-2.0"></icalendar>')
++
++
++def test_multiple_calendars_without_multiple_raises_error():
++    """Several calendars with multiple=False raise an error."""
++    with pytest.raises(CalendarInformationLost, match="multiple=True"):
++        parse(ICAL + ICAL)
++
++
++def test_str_raises_type_error():
++    """Text instead of bytes raises a TypeError."""
++    with pytest.raises(TypeError, match="Expected bytes, but got str"):
++        parse(ICAL.decode())
++
++
++def test_text_file_raises_type_error(data_path):
++    """A file opened in text mode raises a TypeError."""
++    with (
++        data_path.open("r", encoding="utf-8") as file,
++        pytest.raises(TypeError, match='"rb"'),
++    ):
++        parse(file)
