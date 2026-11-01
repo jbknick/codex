@@ -1,0 +1,257 @@
+diff --git a/docs/how-to/upgrade.rst b/docs/how-to/upgrade.rst
+index 55ee9bad2..f090123a2 100644
+--- a/docs/how-to/upgrade.rst
++++ b/docs/how-to/upgrade.rst
+@@ -22,6 +22,65 @@ Breaking changes
+ 
+ This section describes the breaking changes in icalendar 8.0.0, and how to adapt your code to these changes.
+ 
++.. _upgrade-8.0.0-parsing-errors:
++
++Parsing errors are recorded by default
++''''''''''''''''''''''''''''''''''''''
++
++All components now ignore parsing exceptions by default, resolving :issue:`399`.
++Malformed content lines and property values are skipped or represented as broken properties, and the exception is recorded in the component's ``errors`` attribute.
++See :doc:`parse-errors` for how to inspect errors and broken properties, and :attr:`Component.ignore_exceptions <icalendar.cal.component.Component.ignore_exceptions>` for the parsing setting.
++
++Restore the old strict behavior
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++If your code relies on :meth:`Component.from_ical <icalendar.cal.component.Component.from_ical>` raising ``ValueError`` for malformed content, set ``Component.ignore_exceptions = False`` before parsing.
++The following example parses an existing calendar fixture containing a malformed bare ``X`` line.
++
++.. code-block:: pycon
++
++    >>> from icalendar import Component, Calendar
++    >>> previous_ignore_exceptions = Component.ignore_exceptions
++    >>> Component.ignore_exceptions = False
++    >>> Calendar.example("issue_104_broken_calendar")
++    Traceback (most recent call last):
++        ...
++    ValueError: Content line could not be parsed into parts: 'X': Invalid content line
++    >>> # Restore the process-wide setting after the example.
++    >>> Component.ignore_exceptions = previous_ignore_exceptions
++
++Enable tolerant behavior on older versions
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++Only users of icalendar versions before 8.0.0 need this snippet, because 8.0.0 ignores parsing exceptions by default.
++
++Set ``Component.ignore_exceptions = True`` before parsing to record errors instead of raising them.
++Inspect ``errors`` on the component that contains the malformed content.
++
++.. code-block:: pycon
++
++    >>> from icalendar import Component
++    >>> from icalendar import Calendar
++    >>> previous_ignore_exceptions = Component.ignore_exceptions
++    >>> Component.ignore_exceptions = True
++    >>> calendar = Calendar.example("issue_104_broken_calendar")
++    >>> calendar.errors
++    [(None, "Content line could not be parsed into parts: 'X': Invalid content line")]
++    >>> b"\r\nX\r\n" in calendar.to_ical()
++    False
++    >>> # Restore the process-wide setting after the example.
++    >>> Component.ignore_exceptions = previous_ignore_exceptions
++
++Scope and exceptions
++^^^^^^^^^^^^^^^^^^^^
++
++This is a process-wide class setting.
++Creating a subclass of ``Calendar`` doesn't change the component classes created by the component factory.
++As in older versions, ``Event.ignore_exceptions = True`` remains an explicit override, so events stay tolerant when only ``Component.ignore_exceptions`` is set to ``False``.
++
++Strict components raise for malformed content lines and most malformed property values.
++The existing parser exception for malformed ``X-*`` property values remains tolerant even when ``ignore_exceptions`` is ``False``; those errors are recorded and the properties are represented as broken values.
++
+ ``Component.from_ical`` no longer reads files from a ``str`` path
+ '''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+ 
+diff --git a/news/399.breaking b/news/399.breaking
+new file mode 100644
+index 000000000..c073486b1
+--- /dev/null
++++ b/news/399.breaking
+@@ -0,0 +1 @@
++Malformed component content is now ignored by default. Parsing exceptions are recorded in the component's ``errors`` attribute instead of being raised. To enable the previous strict behavior globally, set ``Component.ignore_exceptions = False`` before parsing and restore it afterward as needed. This is a process-wide class setting, and subclassing ``Calendar`` does not change the component classes created by the parser's component factory. Strict mode still tolerates malformed ``X-*`` property values through the parser's existing special case. See the :ref:`upgrade guide <upgrade-8.0.0-parsing-errors>` for examples. AI assisted this contribution. @Pr1meGG
+diff --git a/src/icalendar/cal/component.py b/src/icalendar/cal/component.py
+index 94a68315d..de26f7acf 100644
+--- a/src/icalendar/cal/component.py
++++ b/src/icalendar/cal/component.py
+@@ -117,11 +117,20 @@ class Component(CaselessDict):
+             ('duration', 'repeat')
+     """
+ 
+-    ignore_exceptions: ClassVar[bool] = False
++    ignore_exceptions: ClassVar[bool] = True
+     """Whether or not to ignore exceptions when parsing.
+ 
+-    If ``True``, and this component can't be parsed, then it will silently
+-    ignore it, rather than let the exception propagate upwards.
++    If ``True``, malformed content is skipped or represented as broken
++    properties, and parsing exceptions are recorded in the component's
++    ``errors`` attribute instead of being raised.
++
++    See also:
++        :doc:`/how-to/parse-errors`.
++
++    .. versionchanged:: 0.0.0
++        Defaults to ``True`` for all components. Tolerated parsing errors are
++        recorded in ``errors``. See the
++        :ref:`upgrade guide <upgrade-8.0.0-parsing-errors>` for strict parsing.
+     """
+ 
+     types_factory: ClassVar[TypesFactory] = TypesFactory.instance()
+diff --git a/src/icalendar/tests/calendars/issue_399_malformed_x_property.ics b/src/icalendar/tests/calendars/issue_399_malformed_x_property.ics
+new file mode 100644
+index 000000000..466f8d119
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_399_malformed_x_property.ics
+@@ -0,0 +1,8 @@
++BEGIN:VCALENDAR
++BEGIN:VEVENT
++DTSTART:20150905T090000Z
++DTEND:20150905T100000Z
++UID:123
++X-APPLE-RADIUS=49.91307046514149
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/conftest.py b/src/icalendar/tests/conftest.py
+index 98cf1875a..6361a196d 100644
+--- a/src/icalendar/tests/conftest.py
++++ b/src/icalendar/tests/conftest.py
+@@ -237,6 +237,7 @@ def in_timezone(request, tzp):
+ BROKEN_SOURCE_FILES = (
+     "big_bad_calendar.ics",
+     "issue_104_broken_calendar.ics",
++    "issue_399_malformed_x_property.ics",
+     "issue_1050_multiple_calendars.ics",
+     "small_bad_calendar.ics",
+     "multiple_calendar_components.ics",
+diff --git a/src/icalendar/tests/test_components_break_on_bad_ics.py b/src/icalendar/tests/test_components_break_on_bad_ics.py
+index c3bddd55b..8fe142958 100644
+--- a/src/icalendar/tests/test_components_break_on_bad_ics.py
++++ b/src/icalendar/tests/test_components_break_on_bad_ics.py
+@@ -1,5 +1,7 @@
+ import pytest
+ 
++from icalendar import Component, Event
++
+ 
+ def test_ignore_exceptions_on_broken_events_issue_104(events):
+     """Issue #104 - line parsing error in a VEVENT
+@@ -13,12 +15,70 @@ def test_ignore_exceptions_on_broken_events_issue_104(events):
+     ]
+ 
+ 
+-def test_dont_ignore_exceptions_on_broken_calendars_issue_104(calendars):
+-    """Issue #104 - line parsing error in a VCALENDAR
+-    (which doesn't have ignore_exceptions). Should raise an exception.
++def test_ignore_exceptions_on_broken_calendars_issue_104(calendars):
++    """Issue #104 - changed to record errors instead of raising for issue #399.
++
++    https://github.com/collective/icalendar/issues/399
+     """
+-    with pytest.raises(ValueError):
+-        calendars.issue_104_broken_calendar
++    calendar = calendars.issue_104_broken_calendar
++    assert calendar.errors == [
++        (None, "Content line could not be parsed into parts: 'X': Invalid content line")
++    ]
++
++
++def test_issue_399_malformed_lines_are_handled_consistently(calendars):
++    """Malformed content lines are skipped and recorded for every component."""
++    bare_x_calendar = calendars.issue_104_broken_calendar
++    malformed_x_property_calendar = calendars.issue_399_malformed_x_property
++
++    assert malformed_x_property_calendar.events[0].errors == [
++        (
++            None,
++            (
++                "Content line could not be parsed into parts: "
++                "'X-APPLE-RADIUS=49.91307046514149': "
++                "X-APPLE-RADIUS=49.91307046514149"
++            ),
++        )
++    ]
++    assert b"\r\nX\r\n" not in bare_x_calendar.to_ical()
++    assert b"X-APPLE-RADIUS" not in malformed_x_property_calendar.to_ical()
++
++
++def test_strict_parsing_can_be_enabled_globally(calendars, monkeypatch):
++    """The global strict setting still raises for malformed content lines."""
++    monkeypatch.setattr(Component, "ignore_exceptions", False)
++
++    with pytest.raises(
++        ValueError,
++        match=r"^Content line could not be parsed into parts: 'X': Invalid content line$",
++    ):
++        calendars.issue_104_broken_calendar.subcomponents
++
++
++def test_event_override_preserves_tolerant_parsing(calendars, monkeypatch):
++    """Events remain tolerant unless their explicit override is changed."""
++    monkeypatch.setattr(Component, "ignore_exceptions", False)
++
++    parsed = calendars.issue_399_malformed_x_property
++    assert parsed.events[0].errors == [
++        (
++            None,
++            (
++                "Content line could not be parsed into parts: "
++                "'X-APPLE-RADIUS=49.91307046514149': "
++                "X-APPLE-RADIUS=49.91307046514149"
++            ),
++        )
++    ]
++    assert b"X-APPLE-RADIUS" not in parsed.to_ical()
++
++    monkeypatch.setattr(Event, "ignore_exceptions", False)
++    with pytest.raises(
++        ValueError,
++        match=r"^Content line could not be parsed into parts: 'X-APPLE-RADIUS=49\.91307046514149': X-APPLE-RADIUS=49\.91307046514149$",
++    ):
++        calendars.issue_399_malformed_x_property.subcomponents
+ 
+ 
+ def test_rdate_dosent_become_none_on_invalid_input_issue_464(events):
+diff --git a/src/icalendar/tests/test_unit_cal.py b/src/icalendar/tests/test_unit_cal.py
+index 510e0b24b..cc2c3be77 100644
+--- a/src/icalendar/tests/test_unit_cal.py
++++ b/src/icalendar/tests/test_unit_cal.py
+@@ -461,9 +461,30 @@ def test_calendar_with_parsing_errors_has_an_error_in_one_event(calendars):
+     assert errors == [[], [("EXDATE", "Expected datetime, date, or time. Got: ''")]]
+ 
+ 
+-def test_cal_strict_parsing(calendars):
+-    """If components are damaged, we raise an exception."""
+-    with pytest.raises(ValueError):
++def test_cal_parsing_errors_are_ignored(calendars):
++    """Changed to record errors instead of raising for issue #399.
++
++    https://github.com/collective/icalendar/issues/399
++    """
++    calendar = calendars.parsing_error_in_UTC_offset
++    timezone = calendar.subcomponents[0]
++    standard = timezone.subcomponents[0]
++    assert timezone.name == "VTIMEZONE"
++    assert standard.name == "STANDARD"
++    assert calendar.errors == []
++    assert timezone.errors == []
++    assert standard.errors == [
++        ("TZOFFSETFROM", "Offset must be less than 24 hours, was +5744"),
++        ("TZOFFSETTO", "Offset must be less than 24 hours, was +5744"),
++    ]
++
++
++def test_cal_strict_parsing(calendars, monkeypatch):
++    """Issue #399 - strict parsing still raises for a damaged UTC offset."""
++    monkeypatch.setattr(Component, "ignore_exceptions", False)
++    with pytest.raises(
++        ValueError, match=r"^Offset must be less than 24 hours, was \+5744$"
++    ):
+         calendars.parsing_error_in_UTC_offset.subcomponents
+ 
+ 
