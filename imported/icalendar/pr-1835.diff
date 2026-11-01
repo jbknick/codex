@@ -1,0 +1,116 @@
+diff --git a/news/1796.bugfix b/news/1796.bugfix
+new file mode 100644
+index 000000000..5f518412e
+--- /dev/null
++++ b/news/1796.bugfix
+@@ -0,0 +1,3 @@
++Prefer DURATION when a VEVENT contains both DTEND and DURATION when both describe the same end time; reject conflicting values.
++
++Contributed by @aspire488.
+diff --git a/src/icalendar/attr.py b/src/icalendar/attr.py
+index e87feae4b..a7deeb58b 100644
+--- a/src/icalendar/attr.py
++++ b/src/icalendar/attr.py
+@@ -1772,15 +1772,6 @@ def get_start_end_duration_with_validation(
+     end = getattr(component, end_property, None)
+     duration = component.DURATION
+ 
+-    # RFC 5545: Only one of end property and DURATION may be present
+-    if duration is not None and end is not None:
+-        end_name = "DTEND" if end_property == "DTEND" else "DUE"
+-        msg = (
+-            f"Only one of {end_name} and DURATION "
+-            f"may be in a {component_name}, not both."
+-        )
+-        raise InvalidCalendar(msg)
+-
+     # RFC 5545: When DTSTART is a date, DURATION must be of days or weeks
+     if (
+         start is not None
+@@ -1791,6 +1782,15 @@ def get_start_end_duration_with_validation(
+         msg = "When DTSTART is a date, DURATION must be of days or weeks."
+         raise InvalidCalendar(msg)
+ 
++    # Per #1796, prefer DURATION over DTEND because that removes some errors
++    # with inconsistent timezone usage. Only do so when both represent the
++    # same end time; conflicting values are ambiguous and remain invalid.
++    if duration is not None and end is not None:
++        if start is not None and end != start + duration:
++            msg = f"{end_property} and DURATION specify different end times."
++            raise InvalidCalendar(msg)
++        end = None
++
+     # RFC 5545: DTSTART and end property must be of the same type
+     if start is not None and end is not None and is_date(start) != is_date(end):
+         end_name = "DTEND" if end_property == "DTEND" else "DUE"
+diff --git a/src/icalendar/tests/test_consolidation_attr_functions.py b/src/icalendar/tests/test_consolidation_attr_functions.py
+index d6dd671c8..692b269ac 100644
+--- a/src/icalendar/tests/test_consolidation_attr_functions.py
++++ b/src/icalendar/tests/test_consolidation_attr_functions.py
+@@ -276,16 +276,39 @@ def test_get_start_end_duration_validation_success(self) -> None:
+ 
+     def test_get_start_end_duration_validation_errors(self) -> None:
+         """Test get_start_end_duration_with_validation error cases."""
+-        # Test both DTEND and DURATION
++        # When DTEND and DURATION describe the same end time, prefer
++        # DURATION so the explicit duration remains the effective value.
+         event = Event()
+-        event.add("UID", "test-both")
++        event.add("UID", "test-both-matching")
+         event.add("DTSTART", datetime(2026, 1, 1, 12, 0))
+-        event.add("DTEND", datetime(2026, 1, 1, 15, 0))
++        event.add("DTEND", datetime(2026, 1, 1, 14, 0))
+         event.add("DURATION", timedelta(hours=2))
+ 
+-        with pytest.raises(InvalidCalendar, match="Only one of DTEND and DURATION"):
++        start, end, duration = get_start_end_duration_with_validation(
++            event,
++            "DTSTART",
++            "DTEND",
++            "VEVENT",
++        )
++        assert start == datetime(2026, 1, 1, 12, 0)
++        assert end is None
++        assert duration == timedelta(hours=2)
++        assert event.end == datetime(2026, 1, 1, 14, 0)
++
++        # If DTEND and DURATION describe different end times, the
++        # calendar is ambiguous and validation must still fail.
++        # See https://github.com/collective/icalendar/issues/1796
++        event_mismatch = Event()
++        event_mismatch.add("UID", "test-both-mismatch")
++        event_mismatch.add("DTSTART", datetime(2026, 1, 1, 12, 0))
++        event_mismatch.add("DTEND", datetime(2026, 1, 1, 15, 0))
++        event_mismatch.add("DURATION", timedelta(hours=2))
++
++        with pytest.raises(
++            InvalidCalendar, match="DTEND and DURATION specify different end times"
++        ):
+             get_start_end_duration_with_validation(
+-                event,
++                event_mismatch,
+                 "DTSTART",
+                 "DTEND",
+                 "VEVENT",
+diff --git a/src/icalendar/tests/test_issue_662_component_properties.py b/src/icalendar/tests/test_issue_662_component_properties.py
+index 5aafd7f1a..0e0334583 100644
+--- a/src/icalendar/tests/test_issue_662_component_properties.py
++++ b/src/icalendar/tests/test_issue_662_component_properties.py
+@@ -303,7 +303,7 @@ def test_start_and_duration(start_end_component, dtstart, duration):
+         ),
+         (
+             invalid_event_end_3,
+-            "Only one of DTEND and DURATION may be in a VEVENT, not both.",
++            "DTEND and DURATION specify different end times.",
+         ),
+         (
+             invalid_event_end_4,
+@@ -319,7 +319,7 @@ def test_start_and_duration(start_end_component, dtstart, duration):
+         ),
+         (
+             invalid_todo_end_3,
+-            "Only one of DUE and DURATION may be in a VTODO, not both.",
++            "DUE and DURATION specify different end times.",
+         ),
+         (
+             invalid_todo_end_4,
