@@ -1,0 +1,946 @@
+diff --git a/docs/explanation/base64.rst b/docs/explanation/base64.rst
+new file mode 100644
+index 000000000..295d36102
+--- /dev/null
++++ b/docs/explanation/base64.rst
+@@ -0,0 +1,39 @@
++=====================
++BASE64 value encoding
++=====================
++
++Base64 represents bytes with ASCII characters.
++iCalendar uses Base64 for binary data and can also use it for non-binary values.
++The icalendar package uses Python's :mod:`base64` module to encode and decode these values.
++
++The ``ENCODING`` parameter specifies the encoding of a property value.
++Its values are ``BASE64`` and ``8BIT``.
++The default is ``8BIT`` when the parameter is absent.
++
++A property's value type is separate from its encoding.
++The ``VALUE`` parameter can specify a type, such as ``TEXT``, ``DATE``, or ``BINARY``.
++When ``VALUE`` is absent, the property's default type applies.
++The ``VALUE=BINARY`` parameter requires ``ENCODING=BASE64``, as specified in :rfc:`5545#section-3.2.7`.
++
++This property contains an inline PNG attachment.
++
++..  code-block:: text
++
++    ATTACH;FMTTYPE=image/png;ENCODING=BASE64;VALUE=BINARY:iVBORw0KGgoAAAANSUhEU
++     gAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAEl
++     FTkSuQmCC
++
++Each continuation line starts with one space.
++
++For a non-binary value with ``ENCODING=BASE64``, icalendar first decodes the BASE64 data.
++It then reads the bytes as UTF-8 and parses the text according to the property's value type.
++For example, a ``SUMMARY`` becomes text, while a ``DTSTART`` with ``VALUE=DATE`` becomes a date.
++The parser removes ``ENCODING`` from these values and keeps the other parameters.
++
++This distinction also matters when you convert iCalendar data to jCal or xCal.
++Both jCal and xCal require decoded non-binary values without the ``ENCODING`` parameter.
++See :rfc:`7265#section-3.1` and :rfc:`6321#section-3.1`.
++For binary values, :class:`~icalendar.prop.binary.vBinary` keeps the bytes without UTF-8 decoding.
++It uses BASE64 when it writes these values to iCalendar, jCal, or xCal.
++
++See :ref:`read-base64-values` for a parsing example.
+diff --git a/docs/explanation/index.rst b/docs/explanation/index.rst
+index 225bee802..52f9823e4 100644
+--- a/docs/explanation/index.rst
++++ b/docs/explanation/index.rst
+@@ -8,4 +8,5 @@ This part of the documentation explains concepts of icalendar, the Python packag
+     :maxdepth: 2
+ 
+     api-design
++    base64
+     safe-xml-parsing
+diff --git a/docs/how-to/usage.rst b/docs/how-to/usage.rst
+index d0c91d8e6..ff09af050 100644
+--- a/docs/how-to/usage.rst
++++ b/docs/how-to/usage.rst
+@@ -197,6 +197,30 @@ You can also choose to use the :meth:`icalendar.cal.component.Component.decoded`
+     datetime.datetime(2005, 4, 4, 8, 0)
+ 
+ 
++.. _read-base64-values:
++
++Read BASE64 values
++''''''''''''''''''
++
++Use :meth:`~icalendar.cal.component.Component.from_ical` to read values with ``ENCODING=BASE64``.
++
++.. code-block:: pycon
++
++    >>> event = Event.from_ical(
++    ...     "BEGIN:VEVENT\r\n"
++    ...     "SUMMARY;ENCODING=BASE64;LANGUAGE=en:SGVsbG8=\r\n"
++    ...     "END:VEVENT\r\n"
++    ... )
++    >>> print(event["SUMMARY"])
++    Hello
++    >>> event["SUMMARY"].params["LANGUAGE"]
++    'en'
++
++..  seealso::
++
++    :doc:`../explanation/base64` explains ``ENCODING=BASE64`` and the difference between text and binary values.
++
++
+ Property parameters
+ -------------------
+ 
+diff --git a/news/1932.feature b/news/1932.feature
+new file mode 100644
+index 000000000..82b9f3c20
+--- /dev/null
++++ b/news/1932.feature
+@@ -0,0 +1 @@
++Added support for non-BINARY ``ENCODING=BASE64`` values when reading iCalendar and converting to jCal or xCal. Remove the default ``ENCODING=8BIT`` parameter after parsing. Use ``Parameters.encoding`` to read the normalized encoding. Invalid BASE64 data in ``vBinary.base64data`` raises ``Base64DecodingError``. Parsers raise ``ICalParsingError``, ``JCalParsingError``, or ``XCalParsingError`` for their format. AI helped with the code, tests, and review. @radixun
+diff --git a/src/icalendar/__init__.py b/src/icalendar/__init__.py
+index 6da3d3de5..3c73e7c73 100644
+--- a/src/icalendar/__init__.py
++++ b/src/icalendar/__init__.py
+@@ -33,6 +33,7 @@
+     VALUE,
+ )
+ from icalendar.error import (
++    Base64DecodingError,
+     BrokenCalendarProperty,
+     ComponentEndMissing,
+     ComponentStartMissing,
+@@ -119,6 +120,7 @@
+     "Alarms",
+     "Availability",
+     "Available",
++    "Base64DecodingError",
+     "BrokenCalendarProperty",
+     "Calendar",
+     "Component",
+diff --git a/src/icalendar/error.py b/src/icalendar/error.py
+index e929922e2..f38cf25d3 100644
+--- a/src/icalendar/error.py
++++ b/src/icalendar/error.py
+@@ -48,6 +48,10 @@ def __init__(
+         super().__init__(full_message)
+ 
+ 
++class Base64DecodingError(InvalidCalendar):
++    """A BASE64 value could not be decoded."""
++
++
+ class BrokenCalendarProperty(InvalidCalendar):
+     """A property could not be parsed and its value is broken.
+ 
+@@ -383,6 +387,7 @@ def __init__(
+ 
+ 
+ __all__ = [
++    "Base64DecodingError",
+     "BrokenCalendarProperty",
+     "ComponentEndMissing",
+     "ComponentStartMissing",
+diff --git a/src/icalendar/parser/ical/component.py b/src/icalendar/parser/ical/component.py
+index f0e2bc151..58fb75bf7 100644
+--- a/src/icalendar/parser/ical/component.py
++++ b/src/icalendar/parser/ical/component.py
+@@ -4,9 +4,10 @@
+ 
+ from typing import TYPE_CHECKING, ClassVar
+ 
++from icalendar.error import ICalParsingError
+ from icalendar.parser.content_line import Contentline, Contentlines
+-from icalendar.parser.property import split_on_unescaped_comma
+-from icalendar.prop import vBroken
++from icalendar.parser.property import split_on_unescaped_comma, unescape_backslash
++from icalendar.prop import vBinary, vBroken
+ from icalendar.timezone import tzp
+ 
+ if TYPE_CHECKING:
+@@ -186,12 +187,31 @@ def handle_property(
+             if name == "X-COMMENT":
+                 return
+             raise ValueError(f'Property "{name}" does not have a parent component.')
++
++        raw_value = None
++        encoding = params.encoding
++        if encoding == "BASE64" and not issubclass(
++            self.get_factory_for_property(name, params), vBinary
++        ):
++            try:
++                raw_value = vBinary.from_ical(vals).decode("utf-8")
++            except (ValueError, TypeError) as e:
++                if isinstance(e, UnicodeDecodeError):
++                    e = ICalParsingError("BASE64 data is not valid UTF-8", value=vals)
++                self.handle_property_parse_error(e, name, params, vals, line)
++                return
++            # Decode before splitting lists or unescaping TEXT values.
++            vals = unescape_backslash(raw_value)
++            del params["ENCODING"]
++        elif encoding == "8BIT":
++            del params.encoding
++
+         # Determine TZID for datetime properties
+         tzid = params.get("TZID") if params and name in self.datetime_names else None
+ 
+         # Handle special cases for value list preparation
+         if name == "CATEGORIES":
+-            if self.handle_categories(params, vals, line):
++            if self.handle_categories(params, raw_value, line):
+                 return
+             # Fallback to normal processing if we can't find colon
+             vals_list = [vals]
+@@ -209,7 +229,12 @@ def handle_property(
+                 factory, "get_value_from_content_line", None
+             )
+             if get_value_from_content_line is not None:
+-                vals = get_value_from_content_line(line)
++                # Keep UNKNOWN escapes, but do not read BASE64 text again.
++                vals = (
++                    get_value_from_content_line(line)
++                    if raw_value is None
++                    else raw_value
++                )
+             vals_list = [vals]
+ 
+         # Parse all properties eagerly
+@@ -263,7 +288,7 @@ def handle_property_parse_error(
+         self.component.add(name, broken_prop, encode=0)
+ 
+     def handle_categories(
+-        self, params: Parameters, vals: str, line: Contentline
++        self, params: Parameters, raw_value: str | None, line: Contentline
+     ) -> bool:
+         """Handle the special case of CATEGORIES property.
+ 
+@@ -278,7 +303,8 @@ def handle_categories(
+         # (``TEXT`` does not escape ``:``) and truncate the categories.
+         colon_idx = line.value_separator_index()
+         if colon_idx > 0:
+-            raw_value = line_str[colon_idx + 1 :]
++            if raw_value is None:
++                raw_value = line_str[colon_idx + 1 :]
+             # Parse categories immediately (not lazily) for both
+             # strict and tolerant components.
+             # CATEGORIES needs special comma handling
+diff --git a/src/icalendar/parser/parameter.py b/src/icalendar/parser/parameter.py
+index da57bdce9..9c3a5d106 100644
+--- a/src/icalendar/parser/parameter.py
++++ b/src/icalendar/parser/parameter.py
+@@ -461,6 +461,27 @@ def to_jcal(self, exclude_utc=False) -> dict[str, str]:
+     def tzid(self) -> str | None:
+         """The TZID parameter from :rfc:`5545`."""
+ 
++    @property
++    def encoding(self) -> str:
++        """The uppercase ENCODING parameter, or ``8BIT`` if it is absent.
++
++        Use the last value if more than one value is present.
++        See :rfc:`5545#section-3.2.7`.
++        """
++        values = self.get_multiple("ENCODING")
++        return values[-1].upper() if values else "8BIT"
++
++    @encoding.setter
++    def encoding(self, value: str | None) -> None:
++        if value is None:
++            del self.encoding
++        else:
++            self["ENCODING"] = value.upper()
++
++    @encoding.deleter
++    def encoding(self) -> None:
++        self.pop("ENCODING", None)
++
+     def is_utc(self) -> bool:
+         """Whether the TZID parameter is UTC."""
+         return self.tzid == "UTC"
+diff --git a/src/icalendar/prop/binary.py b/src/icalendar/prop/binary.py
+index 68d24f328..f7b77ef09 100644
+--- a/src/icalendar/prop/binary.py
++++ b/src/icalendar/prop/binary.py
+@@ -6,15 +6,32 @@
+ from xml.etree.ElementTree import Element, SubElement
+ 
+ from icalendar.compatibility import Self
+-from icalendar.error import JCalParsingError, XCalParsingError
++from icalendar.error import (
++    Base64DecodingError,
++    ICalParsingError,
++    JCalParsingError,
++    XCalParsingError,
++)
+ from icalendar.parser import Parameters
+ from icalendar.parser.xcal.base import XCalParser
+ from icalendar.parser.xcal.wrapper import from_xcal_wrapper
+ 
+ 
++def _decode_base64(value: str | bytes) -> bytes:
++    """Decode BASE64 data or raise a data error."""
++    try:
++        return base64.b64decode(value, validate=True)
++    except (binascii.Error, ValueError) as e:
++        raise Base64DecodingError("Not valid base 64 encoding.") from e
++
++
+ class vBinary:
+     """Binary property values are Base64 encoded.
+ 
++    See also:
++
++        :doc:`/explanation/base64` explains Base64 encoding and value types.
++
+     ..  versionremoved:: 8.0.0
+         Removed ``obj`` attribute, use :attr:`bytes` to access the binary content.
+ 
+@@ -48,9 +65,9 @@ def to_ical(self) -> bytes:
+     @staticmethod
+     def from_ical(ical: str | bytes) -> bytes:
+         try:
+-            return base64.b64decode(ical, validate=True)
+-        except (binascii.Error, ValueError) as e:
+-            raise ValueError("Not valid base 64 encoding.") from e
++            return _decode_base64(ical)
++        except Base64DecodingError as e:
++            raise ICalParsingError(str(e)) from e
+ 
+     @property
+     def base64data(self) -> str:
+@@ -76,9 +93,9 @@ def base64data(self, value: str) -> None:
+             value: A Base64-encoded string.
+ 
+         Raises:
+-            ValueError: If ``value`` isn't valid Base64.
++            ~error.Base64DecodingError: If ``value`` is not valid BASE64.
+         """
+-        self.bytes = self.from_ical(value)
++        self.bytes = _decode_base64(value)
+ 
+     def __eq__(self, other: object) -> bool:
+         """self == other"""
+@@ -128,8 +145,12 @@ def from_jcal(cls, jcal_property: list) -> Self:
+         """
+         JCalParsingError.validate_property(jcal_property, cls)
+         JCalParsingError.validate_value_type(jcal_property[3], str, cls, 3)
++        try:
++            binary = _decode_base64(jcal_property[3])
++        except Base64DecodingError as e:
++            raise JCalParsingError(str(e), cls, 3) from e
+         return cls(
+-            cls.from_ical(jcal_property[3]),
++            binary,
+             params=Parameters.from_jcal_property(jcal_property),
+         )
+ 
+@@ -153,8 +174,8 @@ def from_xcal(cls, parser: XCalParser, params: Parameters) -> Self:
+         element = parser.parse_tag(cls.default_value)
+         text = element.get_text_without_whitespace()
+         try:
+-            binary = base64.b64decode(text, validate=True)
+-        except binascii.Error as e:
++            binary = _decode_base64(text)
++        except Base64DecodingError as e:
+             raise XCalParsingError(
+                 "Expected base64 encoded data",
+                 None,  # do not print potentially huge chunks of data
+diff --git a/src/icalendar/tests/calendars/issue_1932/custom_encoded.ics b/src/icalendar/tests/calendars/issue_1932/custom_encoded.ics
+new file mode 100644
+index 000000000..abf3a31a1
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1932/custom_encoded.ics
+@@ -0,0 +1,12 @@
++BEGIN:VCALENDAR
++VERSION:2.0
++PRODID:-//icalendar//BASE64 tests//EN
++BEGIN:VEVENT
++UID:float
++X-NUMBER;VALUE=FLOAT;ENCODING=BASE64:MS41
++END:VEVENT
++BEGIN:VEVENT
++UID:boolean
++X-BOOL;VALUE=BOOLEAN;ENCODING=BASE64:VFJVRQ==
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/calendars/issue_1932/custom_plain.ics b/src/icalendar/tests/calendars/issue_1932/custom_plain.ics
+new file mode 100644
+index 000000000..6710abb5d
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1932/custom_plain.ics
+@@ -0,0 +1,12 @@
++BEGIN:VCALENDAR
++VERSION:2.0
++PRODID:-//icalendar//BASE64 tests//EN
++BEGIN:VEVENT
++UID:float
++X-NUMBER;VALUE=FLOAT:1.5
++END:VEVENT
++BEGIN:VEVENT
++UID:boolean
++X-BOOL;VALUE=BOOLEAN:TRUE
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/calendars/issue_1932_base64.ics b/src/icalendar/tests/calendars/issue_1932_base64.ics
+new file mode 100644
+index 000000000..00bb41faa
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1932_base64.ics
+@@ -0,0 +1,118 @@
++BEGIN:VCALENDAR
++VERSION:2.0
++PRODID:-//icalendar//BASE64 tests//EN
++BEGIN:VEVENT
++UID:text
++SUMMARY;ENCODING=BASE64:SGVsbG8=
++END:VEVENT
++BEGIN:VEVENT
++UID:utf8
++SUMMARY;LANGUAGE=fr;ENCODING=base64:Q2Fmw6kgw6AgUGFyaXM=
++END:VEVENT
++BEGIN:VEVENT
++UID:escapes
++DESCRIPTION;ENCODING=BaSe64:Rmlyc3RcblNlY29uZFwsIHRoaXJkXDsg
++ cGF0aFxcbmFtZQ==
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-text
++SUMMARY;ENCODING=BASE64:
++END:VEVENT
++BEGIN:VEVENT
++UID:integer
++PRIORITY;ENCODING=base64:Mw==
++END:VEVENT
++BEGIN:VEVENT
++UID:date
++DTSTART;VALUE=DATE;ENCODING=BASE64:MjAyNjEwMjE=
++END:VEVENT
++BEGIN:VEVENT
++UID:timezone
++DTSTART;TZID=Europe/Berlin;ENCODING=BASE64:MjAyNjEwMjFUMTAzM
++ DAw
++END:VEVENT
++BEGIN:VEVENT
++UID:duration
++DURATION;ENCODING=BASE64:UFQxSA==
++END:VEVENT
++BEGIN:VEVENT
++UID:recurrence
++RRULE;ENCODING=BASE64:RlJFUT1EQUlMWTtDT1VOVD0y
++END:VEVENT
++BEGIN:VEVENT
++UID:categories
++CATEGORIES;LANGUAGE=en;ENCODING=base64:d29ya1wsaG9tZSxjYWxsO
++ nRlYW0scGF0aFxcbmFtZQ==
++END:VEVENT
++BEGIN:VEVENT
++UID:rdate
++RDATE;VALUE=DATE;ENCODING=BASE64:MjAyNjEwMjEsMjAyNjEwMjI=
++END:VEVENT
++BEGIN:VEVENT
++UID:exdate
++EXDATE;VALUE=DATE;ENCODING=BASE64:MjAyNjEwMjEsMjAyNjEwMjI=
++END:VEVENT
++BEGIN:VEVENT
++UID:freebusy
++FREEBUSY;ENCODING=BASE64:MjAyNjEwMjFUMTAwMDAwWi9QVDFILDIwMjY
++ xMDIyVDEwMDAwMFovUFQySA==
++END:VEVENT
++BEGIN:VEVENT
++UID:uri
++URL;ENCODING=BASE64:aHR0cHM6Ly9leGFtcGxlLm9yZy9hJTJGYg==
++END:VEVENT
++BEGIN:VEVENT
++UID:unknown
++X-OPAQUE;ENCODING=BASE64:b25lXG50d29cLHRocmVlOyUyRg==
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-unknown
++X-OPAQUE;ENCODING=BASE64:
++END:VEVENT
++BEGIN:VEVENT
++UID:quoted-params
++SUMMARY;ALTREP="https://example.org/a:b";LANGUAGE=fr;ENCODIN
++ G=BASE64:Q2Fmw6lcLCBjYWxsOnRlYW0=
++END:VEVENT
++BEGIN:VEVENT
++UID:folded
++SUMMARY;ENCODING=BASE64:Q2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fm
++ w6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kg
++ Q2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fm
++ w6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kg
++ Q2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fm
++ w6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6kgQ2Fmw6k=
++END:VEVENT
++BEGIN:VEVENT
++UID:8bit
++SUMMARY;ENCODING=8bit:SGVsbG8=
++END:VEVENT
++BEGIN:VEVENT
++UID:repeated-encoding
++SUMMARY;ENCODING=base64;ENCODING=BASE64:SGVsbG8=
++END:VEVENT
++BEGIN:VEVENT
++UID:encoding-list
++SUMMARY;ENCODING=BASE64,base64:SGVsbG8=
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-once
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:U0dWc2JHOD0=
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-bytes
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCU
++ mJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJ
++ TVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+
++ AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6y
++ trq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nn
++ a29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-binary
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/calendars/issue_1932_invalid_base64.ics b/src/icalendar/tests/calendars/issue_1932_invalid_base64.ics
+new file mode 100644
+index 000000000..add46a767
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1932_invalid_base64.ics
+@@ -0,0 +1,39 @@
++BEGIN:VCALENDAR
++VERSION:2.0
++PRODID:-//icalendar//BASE64 tests//EN
++BEGIN:VEVENT
++UID:text-padding
++SUMMARY;ENCODING=BASE64:SGVsbG8
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:text-alphabet
++SUMMARY;ENCODING=BASE64:!!!
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:text-ascii
++SUMMARY;ENCODING=BASE64:é
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:text-utf8
++SUMMARY;ENCODING=BASE64:/w==
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-padding
++ATTACH;VALUE=BINARY;ENCODING=BASE64:SGVsbG8
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-alphabet
++ATTACH;VALUE=BINARY;ENCODING=BASE64:!!!
++LOCATION:Elsewhere
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-ascii
++ATTACH;VALUE=BINARY;ENCODING=BASE64:é
++LOCATION:Elsewhere
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/calendars/issue_1932_plain.ics b/src/icalendar/tests/calendars/issue_1932_plain.ics
+new file mode 100644
+index 000000000..52cf47941
+--- /dev/null
++++ b/src/icalendar/tests/calendars/issue_1932_plain.ics
+@@ -0,0 +1,112 @@
++BEGIN:VCALENDAR
++VERSION:2.0
++PRODID:-//icalendar//BASE64 tests//EN
++BEGIN:VEVENT
++UID:text
++SUMMARY:Hello
++END:VEVENT
++BEGIN:VEVENT
++UID:utf8
++SUMMARY;LANGUAGE=fr:Café à Paris
++END:VEVENT
++BEGIN:VEVENT
++UID:escapes
++DESCRIPTION:First\nSecond\, third\; path\\name
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-text
++SUMMARY:
++END:VEVENT
++BEGIN:VEVENT
++UID:integer
++PRIORITY:3
++END:VEVENT
++BEGIN:VEVENT
++UID:date
++DTSTART;VALUE=DATE:20261021
++END:VEVENT
++BEGIN:VEVENT
++UID:timezone
++DTSTART;TZID=Europe/Berlin:20261021T103000
++END:VEVENT
++BEGIN:VEVENT
++UID:duration
++DURATION:PT1H
++END:VEVENT
++BEGIN:VEVENT
++UID:recurrence
++RRULE:FREQ=DAILY;COUNT=2
++END:VEVENT
++BEGIN:VEVENT
++UID:categories
++CATEGORIES;LANGUAGE=en:work\,home,call:team,path\\name
++END:VEVENT
++BEGIN:VEVENT
++UID:rdate
++RDATE;VALUE=DATE:20261021,20261022
++END:VEVENT
++BEGIN:VEVENT
++UID:exdate
++EXDATE;VALUE=DATE:20261021,20261022
++END:VEVENT
++BEGIN:VEVENT
++UID:freebusy
++FREEBUSY:20261021T100000Z/PT1H,20261022T100000Z/PT2H
++END:VEVENT
++BEGIN:VEVENT
++UID:uri
++URL:https://example.org/a%2Fb
++END:VEVENT
++BEGIN:VEVENT
++UID:unknown
++X-OPAQUE:one\ntwo\,three;%2F
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-unknown
++X-OPAQUE:
++END:VEVENT
++BEGIN:VEVENT
++UID:quoted-params
++SUMMARY;ALTREP="https://example.org/a:b";LANGUAGE=fr:Café\,
++  call:team
++END:VEVENT
++BEGIN:VEVENT
++UID:folded
++SUMMARY:Café Café Café Café Café Café Café Café Café Café Ca
++ fé Café Café Café Café Café Café Café Café Café Café Café Ca
++ fé Café Café Café Café Café Café Café Café Café Café Café Ca
++ fé Café Café Café Café Café
++END:VEVENT
++BEGIN:VEVENT
++UID:8bit
++SUMMARY:SGVsbG8=
++END:VEVENT
++BEGIN:VEVENT
++UID:repeated-encoding
++SUMMARY:Hello
++END:VEVENT
++BEGIN:VEVENT
++UID:encoding-list
++SUMMARY:Hello
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-once
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:U0dWc2JHOD0=
++END:VEVENT
++BEGIN:VEVENT
++UID:binary-bytes
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCU
++ mJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJ
++ TVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+
++ AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6y
++ trq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nn
++ a29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==
++END:VEVENT
++BEGIN:VEVENT
++UID:empty-binary
++ATTACH;VALUE=BINARY;ENCODING=BASE64;FMTTYPE=application/octe
++ t-stream:
++END:VEVENT
++END:VCALENDAR
+diff --git a/src/icalendar/tests/prop/test_vBinary.py b/src/icalendar/tests/prop/test_vBinary.py
+index 6a3837d67..5fbea7098 100644
+--- a/src/icalendar/tests/prop/test_vBinary.py
++++ b/src/icalendar/tests/prop/test_vBinary.py
+@@ -4,7 +4,13 @@
+ 
+ import pytest
+ 
+-from icalendar import Calendar, vBinary
++from icalendar import (
++    Base64DecodingError,
++    Calendar,
++    ICalParsingError,
++    InvalidCalendar,
++    vBinary,
++)
+ from icalendar.parser import Parameters
+ 
+ 
+@@ -41,9 +47,9 @@ def test_repr():
+ 
+ 
+ def test_from_ical():
+-    with pytest.raises(ValueError, match=r"Not valid base 64 encoding\."):
++    with pytest.raises(ICalParsingError, match=r"^Not valid base 64 encoding\.$"):
+         vBinary.from_ical("value")
+-    with pytest.raises(ValueError, match=r"Not valid base 64 encoding\."):
++    with pytest.raises(ICalParsingError, match=r"^Not valid base 64 encoding\.$"):
+         vBinary.from_ical("áèਮ")
+ 
+ 
+@@ -56,8 +62,11 @@ def test_from_ical():
+     ],
+ )
+ def test_from_ical_rejects_non_base64_characters(value):
+-    with pytest.raises(ValueError, match=r"Not valid base 64 encoding\."):
++    with pytest.raises(
++        ICalParsingError, match=r"^Not valid base 64 encoding\.$"
++    ) as error:
+         vBinary.from_ical(value)
++    assert not isinstance(error.value, Base64DecodingError)
+ 
+ 
+ def test_ical_value():
+@@ -134,11 +143,14 @@ def test_base64data_roundtrip():
+     ],
+ )
+ def test_base64data_setter_rejects_invalid_base64(value):
+-    """The setter raises ValueError, matching from_ical's error, for bad input."""
++    """The setter raises a data error and keeps the previous bytes."""
+     obj = vBinary(b"unchanged")
+-    with pytest.raises(ValueError, match=r"Not valid base 64 encoding\."):
++    with pytest.raises(
++        Base64DecodingError, match=r"^Not valid base 64 encoding\.$"
++    ) as error:
+         obj.base64data = value
+-    # a rejected assignment must not mutate the existing value
++    assert isinstance(error.value, InvalidCalendar)
++    assert not isinstance(error.value, ICalParsingError)
+     assert obj.to_ical() == vBinary(b"unchanged").to_ical()
+ 
+ 
+diff --git a/src/icalendar/tests/rfc_6321_xcal/prop/test_binary.py b/src/icalendar/tests/rfc_6321_xcal/prop/test_binary.py
+index ceb7bba73..735691cc4 100644
+--- a/src/icalendar/tests/rfc_6321_xcal/prop/test_binary.py
++++ b/src/icalendar/tests/rfc_6321_xcal/prop/test_binary.py
+@@ -51,7 +51,7 @@ def test_whitespace_is_ignored(types_factory: TypesFactory):
+     assert vBinary.from_xcal(e).bytes == b"The quick"
+ 
+ 
+-INVALID_VALUES = ["INVALID!", "a"]
++INVALID_VALUES = ["INVALID!", "a", "é"]
+ 
+ if sys.version_info >= (3, 12):
+     INVALID_VALUES.append("MTIz=")
+diff --git a/src/icalendar/tests/rfc_7265_jcal/test_invalid_jcal.py b/src/icalendar/tests/rfc_7265_jcal/test_invalid_jcal.py
+index 247de7487..ea95fb361 100644
+--- a/src/icalendar/tests/rfc_7265_jcal/test_invalid_jcal.py
++++ b/src/icalendar/tests/rfc_7265_jcal/test_invalid_jcal.py
+@@ -11,6 +11,7 @@
+     InvalidCalendar,
+     JCalParsingError,
+     Parameters,
++    vBinary,
+     vDate,
+     vDatetime,
+     vDDDTypes,
+@@ -253,6 +254,9 @@ def test_failing_example_delegated_to(calendars):
+         (vTime, "time", r"Cannot parse time\.", ""),
+         (vTime, "time", r"Cannot parse time\.", "asd"),
+         (vDuration, "duration", r"Cannot parse duration\.", "PXD"),
++        (vBinary, "binary", r"Not valid base 64 encoding\.", "SGVsbG8"),
++        (vBinary, "binary", r"Not valid base 64 encoding\.", "!!!"),
++        (vBinary, "binary", r"Not valid base 64 encoding\.", "é"),
+         (
+             vDDDTypes,
+             "date-time",
+@@ -261,8 +265,8 @@ def test_failing_example_delegated_to(calendars):
+         ),
+     ],
+ )
+-def test_date_time_parsing_errors(v_prop, message, ty, value):
+-    """An empty datetime should raise an error."""
++def test_value_parsing_errors(v_prop, message, ty, value):
++    """Invalid data must raise a jCal error with the value path."""
+     with pytest.raises(
+         JCalParsingError,
+         match=rf"\[3\] in {v_prop.__name__}: {message}",
+diff --git a/src/icalendar/tests/test_issue_1932_base64.py b/src/icalendar/tests/test_issue_1932_base64.py
+new file mode 100644
+index 000000000..f1fcc4dec
+--- /dev/null
++++ b/src/icalendar/tests/test_issue_1932_base64.py
+@@ -0,0 +1,115 @@
++"""Check BASE64 decoding with shared calendar fixtures (issue 1932)."""
++
++import pytest
++
++from icalendar import Event, ICalParsingError
++from icalendar.prop import vBinary, vBroken
++
++
++@pytest.mark.parametrize(
++    ("case", "property_name"),
++    [
++        ("text", "SUMMARY"),
++        ("utf8", "SUMMARY"),
++        ("escapes", "DESCRIPTION"),
++        ("empty-text", "SUMMARY"),
++        ("integer", "PRIORITY"),
++        ("date", "DTSTART"),
++        ("timezone", "DTSTART"),
++        ("duration", "DURATION"),
++        ("recurrence", "RRULE"),
++        ("categories", "CATEGORIES"),
++        ("rdate", "RDATE"),
++        ("exdate", "EXDATE"),
++        ("freebusy", "FREEBUSY"),
++        ("uri", "URL"),
++        ("unknown", "X-OPAQUE"),
++        ("empty-unknown", "X-OPAQUE"),
++        ("quoted-params", "SUMMARY"),
++        ("folded", "SUMMARY"),
++        ("8bit", "SUMMARY"),
++        ("repeated-encoding", "SUMMARY"),
++        ("encoding-list", "SUMMARY"),
++        ("binary-once", "ATTACH"),
++        ("binary-bytes", "ATTACH"),
++        ("empty-binary", "ATTACH"),
++    ],
++)
++def test_base64_matches_plain_values(calendars, case, property_name):
++    encoded = calendars.issue_1932_base64
++    plain = calendars.issue_1932_plain
++    actual = next(event for event in encoded.events if event["UID"] == case)
++    expected = next(event for event in plain.events if event["UID"] == case)
++    assert type(actual[property_name]) is type(expected[property_name])
++    assert actual[property_name] == expected[property_name]
++    assert actual.to_ical() == expected.to_ical()
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++def test_base64_custom_value_conversion(calendars, format_name):
++    """Compare custom types; xCal does not yet retain their VALUE parameter."""
++    encoded = calendars["issue_1932/custom_encoded"]
++    plain = calendars["issue_1932/custom_plain"]
++    assert (
++        getattr(encoded, f"to_{format_name}")() == getattr(plain, f"to_{format_name}")()
++    )
++
++
++@pytest.mark.parametrize(
++    ("case", "value"),
++    [
++        ("binary-once", b"SGVsbG8="),
++        ("binary-bytes", bytes(range(256))),
++        ("empty-binary", b""),
++    ],
++)
++def test_base64_binary_bytes(calendars, case, value):
++    event = next(
++        event for event in calendars.issue_1932_base64.events if event["UID"] == case
++    )
++    attachment = event["ATTACH"]
++    assert isinstance(attachment, vBinary)
++    assert attachment.bytes == value
++    assert attachment.params == {
++        "VALUE": "BINARY",
++        "ENCODING": "BASE64",
++        "FMTTYPE": "application/octet-stream",
++    }
++
++
++@pytest.mark.parametrize(
++    ("case", "property_name", "value", "message"),
++    [
++        ("text-padding", "SUMMARY", "SGVsbG8", "Not valid base 64 encoding."),
++        ("text-alphabet", "SUMMARY", "!!!", "Not valid base 64 encoding."),
++        ("text-ascii", "SUMMARY", "é", "Not valid base 64 encoding."),
++        (
++            "text-utf8",
++            "SUMMARY",
++            "/w==",
++            "BASE64 data is not valid UTF-8: '/w=='",
++        ),
++        ("binary-padding", "ATTACH", "SGVsbG8", "Not valid base 64 encoding."),
++        ("binary-alphabet", "ATTACH", "!!!", "Not valid base 64 encoding."),
++        ("binary-ascii", "ATTACH", "é", "Not valid base 64 encoding."),
++    ],
++)
++def test_base64_errors(calendars, monkeypatch, case, property_name, value, message):
++    event = next(
++        event
++        for event in calendars.issue_1932_invalid_base64.events
++        if event["UID"] == case
++    )
++    broken = event[property_name]
++    assert isinstance(broken, vBroken)
++    assert broken == value
++    assert broken.params["ENCODING"] == "BASE64"
++    assert isinstance(broken.parse_error, ICalParsingError)
++    assert str(broken.parse_error) == message
++    assert event.errors == [(property_name, message)]
++    assert event["LOCATION"] == "Elsewhere"
++
++    monkeypatch.setattr(Event, "ignore_exceptions", False)
++    with pytest.raises(ICalParsingError) as error:
++        Event.from_ical(event.to_ical())
++    assert str(error.value) == message
+diff --git a/src/icalendar/tests/test_parameter_access.py b/src/icalendar/tests/test_parameter_access.py
+index e923f37bb..bf1426af5 100644
+--- a/src/icalendar/tests/test_parameter_access.py
++++ b/src/icalendar/tests/test_parameter_access.py
+@@ -50,3 +50,46 @@ def test_delete_value_None(p):
+     p.value = None
+     assert p.value is None
+     assert "VALUE" not in p
++
++
++@pytest.mark.parametrize(
++    ("value", "expected"),
++    [
++        ("base64", "BASE64"),
++        ("BaSe64", "BASE64"),
++        ("8bit", "8BIT"),
++        (["base64", "8bit"], "8BIT"),
++        (["8bit", "base64"], "BASE64"),
++        ([], "8BIT"),
++    ],
++)
++def test_encoding_parameter(value, expected):
++    params = Parameters(encoding=value)
++    assert params.encoding == expected
++    assert params["ENCODING"] == value
++
++
++def test_encoding_parameter_default_and_delete(p):
++    assert p.encoding == "8BIT"
++    assert "ENCODING" not in p
++    p.encoding = "base64"
++    assert p.encoding == "BASE64"
++    assert p["ENCODING"] == "BASE64"
++    del p.encoding
++    del p.encoding
++    assert p.encoding == "8BIT"
++    assert "ENCODING" not in p
++    p.encoding = "base64"
++    p.encoding = None
++    assert p.encoding == "8BIT"
++    assert "ENCODING" not in p
++    del p.encoding
++    assert p.encoding == "8BIT"
++
++
++@pytest.mark.parametrize(
++    "value",
++    ["ENCODING=8BIT;ENCODING=base64", "ENCODING=8BIT,base64"],
++)
++def test_repeated_encoding_parameter(value):
++    assert Parameters.from_ical(value).encoding == "BASE64"
