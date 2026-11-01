@@ -1,0 +1,559 @@
+diff --git a/docs/how-to/usage.rst b/docs/how-to/usage.rst
+index d0c91d8e6..7d8de5e1d 100644
+--- a/docs/how-to/usage.rst
++++ b/docs/how-to/usage.rst
+@@ -251,6 +251,23 @@ Read a calendar from a local :file:`.ics` file and view its events.
+     International Women's Day
+ 
+ 
++The component parsers :meth:`~icalendar.cal.component.Component.from_ical`, :meth:`~icalendar.cal.component.Component.from_jcal`, and :meth:`~icalendar.cal.component.Component.from_xcal` accept serialized data as :class:`str`, :class:`bytes`, :class:`pathlib.Path`, or an open text or binary file.
++Strings contain calendar data, not file names.
++Use a :class:`~pathlib.Path` to read a file by name.
++The parsers close files that they open from paths.
++Files supplied by the caller stay open and are read from their current position.
++Open text files using their original encoding.
++The default XML parser does not reapply encoding declarations to text that you have already decoded.
++The jCal parser also accepts a :class:`list`, and the xCal parser accepts an XML element.
++
++For example, pass an open file to the iCalendar parser:
++
++.. code-block:: python
++
++    with ics_path.open("rb") as calendar_file:
++        calendar = icalendar.Calendar.from_ical(calendar_file)
++
++
+ Read calendar from URL
+ ''''''''''''''''''''''
+ 
+diff --git a/news/2045.feature b/news/2045.feature
+new file mode 100644
+index 000000000..0cff90f8b
+--- /dev/null
++++ b/news/2045.feature
+@@ -0,0 +1 @@
++Aligned component iCal, jCal, and xCal parsers to accept strings, bytes, paths, and open text or binary files while preserving caller ownership. AI assistance was used for implementation and tests. @mayankdhingra02
+diff --git a/src/icalendar/cal/calendar.py b/src/icalendar/cal/calendar.py
+index 7fff6b561..95ff4da40 100644
+--- a/src/icalendar/cal/calendar.py
++++ b/src/icalendar/cal/calendar.py
+@@ -18,7 +18,7 @@
+     uid_property,
+     url_property,
+ )
+-from icalendar.cal.component import Component
++from icalendar.cal.component import Component, _SerializedInput
+ from icalendar.cal.examples import get_example
+ from icalendar.cal.timezone import Timezone
+ from icalendar.error import IncompleteComponent
+@@ -28,7 +28,6 @@
+ if TYPE_CHECKING:
+     from collections.abc import Iterable, Sequence
+     from datetime import date, datetime
+-    from pathlib import Path
+ 
+     from icalendar.cal import (
+         Availability,
+@@ -163,23 +162,25 @@ def _get_ical_parser(cls, st: str | bytes) -> ComponentIcalParser:
+     @overload
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: Literal[False] = False
++        cls, st: _SerializedInput, multiple: Literal[False] = False
+     ) -> Calendar: ...
+ 
+     @overload
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: Literal[True]
++        cls, st: _SerializedInput, multiple: Literal[True]
+     ) -> list[Calendar]: ...
+ 
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: bool = False
++        cls, st: _SerializedInput, multiple: bool = False
+     ) -> Calendar | list[Calendar]:
+         """Parse iCalendar data into calendar instances.
+ 
+         Parameters:
+-            st: iCalendar data as bytes or string, or a path to an iCalendar file.
++            st: iCalendar data as a string, bytes, :class:`pathlib.Path`, or an
++                open text or binary file. Open files are read from their current
++                position and left open. Strings are data, not file names.
+             multiple: If ``True``, returns a list of calendars.
+                 If ``False``, returns a single calendar.
+ 
+diff --git a/src/icalendar/cal/component.py b/src/icalendar/cal/component.py
+index 725342ffd..f70ff310f 100644
+--- a/src/icalendar/cal/component.py
++++ b/src/icalendar/cal/component.py
+@@ -6,9 +6,9 @@
+ from copy import deepcopy
+ from dataclasses import dataclass
+ from datetime import date, datetime, time, timedelta, timezone
+-from io import BytesIO
++from io import BytesIO, StringIO
+ from pathlib import Path
+-from typing import IO, TYPE_CHECKING, Any, BinaryIO, ClassVar, Literal, overload
++from typing import IO, TYPE_CHECKING, Any, ClassVar, Literal, overload
+ from xml.etree.ElementTree import Element, ElementTree, SubElement
+ from xml.etree.ElementTree import indent as indent_xml
+ 
+@@ -50,6 +50,8 @@
+ 
+ _marker = []
+ 
++_SerializedInput = str | bytes | Path | IO[str] | IO[bytes]
++
+ 
+ @dataclass
+ class _ComponentEqFrame:
+@@ -581,13 +583,13 @@ def property_items(
+     @overload
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: Literal[False] = False
++        cls, st: _SerializedInput, multiple: Literal[False] = False
+     ) -> Component: ...
+ 
+     @overload
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: Literal[True]
++        cls, st: _SerializedInput, multiple: Literal[True]
+     ) -> list[Component]: ...
+ 
+     @classmethod
+@@ -597,15 +599,16 @@ def _get_ical_parser(cls, st: str | bytes) -> ComponentIcalParser:
+ 
+     @classmethod
+     def from_ical(
+-        cls, st: str | bytes | Path, multiple: bool = False
++        cls, st: _SerializedInput, multiple: bool = False
+     ) -> Component | list[Component]:
+         """Parse iCalendar data into component instances.
+ 
+         Handles standard and custom components (``X-*``, IANA-registered).
+ 
+         Parameters:
+-            st: iCalendar data as bytes or string, or a path to an iCalendar file as
+-                :class:`pathlib.Path`.
++            st: iCalendar data as a string, bytes, :class:`pathlib.Path`, or an
++                open text or binary file. Open files are read from their current
++                position and left open. Strings are data, not file names.
+             multiple: If ``True``, returns list. If ``False``, returns single component.
+ 
+         Returns:
+@@ -616,6 +619,8 @@ def from_ical(
+         """
+         if isinstance(st, Path):
+             st = st.read_bytes()
++        elif hasattr(st, "read"):
++            st = st.read()
+         parser = cls._get_ical_parser(st)
+         components = parser.parse()
+         if multiple:
+@@ -1053,11 +1058,14 @@ def to_json(self, indent: int | str | None = None) -> str:
+         )
+ 
+     @classmethod
+-    def from_jcal(cls, jcal: str | list) -> Component:
++    def from_jcal(cls, jcal: _SerializedInput | list) -> Component:
+         """Create a component from a jCal list.
+ 
+         Parameters:
+-            jcal: jCal list or JSON string according to :rfc:`7265`.
++            jcal: jCal list or JSON data according to :rfc:`7265`, as a string,
++                bytes, :class:`pathlib.Path`, or an open text or binary file.
++                Open files are read from their current position and left open.
++                Strings are data, not file names.
+ 
+         Raises:
+             ~icalendar.error.JCalParsingError: If the jCal provided is invalid.
+@@ -1098,7 +1106,11 @@ def from_jcal(cls, jcal: str | list) -> Component:
+             Planning meeting
+ 
+         """
+-        if isinstance(jcal, str):
++        if isinstance(jcal, Path):
++            jcal = jcal.read_bytes()
++        elif hasattr(jcal, "read"):
++            jcal = jcal.read()
++        if isinstance(jcal, (str, bytes)):
+             jcal = json.loads(jcal)
+         # Iterative tree build to avoid RecursionError on deeply nested jCal,
+         # mirroring the iterative iCal parser (GH #1370). ``_node_from_jcal``
+@@ -1301,11 +1313,14 @@ def to_xcal_element(self, element: Element, /) -> None:
+                 subcomponent.to_xcal(e_components)
+ 
+     @classmethod
+-    def from_xcal(cls, xcal: Element | bytes | Path | BinaryIO) -> list[Self]:
++    def from_xcal(cls, xcal: Element | _SerializedInput) -> list[Self]:
+         """Parse xCal according to :rfc:`6321`.
+ 
+         Parameters:
+-            xcal: The xCal element or data to parse.
++            xcal: An XML element or xCal data as a string, bytes,
++                :class:`pathlib.Path`, or an open text or binary file.
++                Open files are read from their current position and left open.
++                Strings are data, not file names.
+ 
+         Returns:
+             The parsed component.
+@@ -1341,18 +1356,21 @@ def from_xcal(cls, xcal: Element | bytes | Path | BinaryIO) -> list[Self]:
+         """
+         from icalendar.parser.xcal.component import XCalComponentParser
+ 
+-        if isinstance(xcal, Path):
+-            xcal = xcal.open("rb")
+-        elif isinstance(xcal, bytes):
+-            xcal = BytesIO(xcal)
+-        if hasattr(xcal, "read"):
+-            element = config.parse_xml(xcal).getroot()
+-        elif isinstance(xcal, Element):
++        if isinstance(xcal, Element):
+             element = xcal
++        elif isinstance(xcal, Path):
++            with xcal.open("rb") as file:
++                element = config.parse_xml(file).getroot()
+         else:
+-            raise TypeError(
+-                f"Expected an XML Element, bytes, Path, or file object. Got {xcal}"
+-            )
++            if isinstance(xcal, bytes):
++                xcal = BytesIO(xcal)
++            elif isinstance(xcal, str):
++                xcal = StringIO(xcal)
++            if not hasattr(xcal, "read"):
++                raise TypeError(
++                    f"Expected an XML Element, string, bytes, Path, or file object. Got {xcal}"
++                )
++            element = config.parse_xml(xcal).getroot()
+         parser = XCalComponentParser(
+             element, cls._get_component_factory(), cls.types_factory
+         )
+diff --git a/src/icalendar/config.py b/src/icalendar/config.py
+index 86ed19882..7d6075ea3 100644
+--- a/src/icalendar/config.py
++++ b/src/icalendar/config.py
+@@ -2,7 +2,7 @@
+ 
+ from __future__ import annotations
+ 
+-from xml.etree.ElementTree import Element, ElementTree, parse
++from xml.etree.ElementTree import Element, ElementTree, XMLParser, parse
+ 
+ MAX_ALARM_REPEAT: int = 10_000
+ """Cap on additional triggers expanded from a ``VALARM`` ``REPEAT`` property.
+@@ -45,7 +45,9 @@ def parse_xml(source) -> ElementTree[Element[str]]:
+         :ref:`safe-xml-parsing`
+ 
+     Parameters:
+-        source: A file-like object to with a ``read`` method.
++        source: A text or binary file-like object with a ``read`` method.
++            Text is already decoded, so its XML encoding declaration is ignored.
++            Binary input retains XML encoding detection.
+ 
+     Returns:
+         The parsed XML tree.
+@@ -56,8 +58,10 @@ def parse_xml(source) -> ElementTree[Element[str]]:
+     """
+     if not hasattr(source, "read"):
+         raise TypeError("Expected source.read() method.")
++    # Text is already decoded; its encoding declaration describes the original bytes.
++    parser = XMLParser(encoding="utf-8") if isinstance(source.read(0), str) else None  # noqa: S314
+     # S314 Using `xml` to parse untrusted data is known to be vulnerable to XML attacks
+-    return parse(source)  # noqa: S314
++    return parse(source, parser=parser)  # noqa: S314
+ 
+ 
+ __all__ = [
+diff --git a/src/icalendar/tests/rfc_6321_xcal/cal/test_from_xcal.py b/src/icalendar/tests/rfc_6321_xcal/cal/test_from_xcal.py
+index 59f5ac0ec..cb6b8f669 100644
+--- a/src/icalendar/tests/rfc_6321_xcal/cal/test_from_xcal.py
++++ b/src/icalendar/tests/rfc_6321_xcal/cal/test_from_xcal.py
+@@ -65,10 +65,10 @@ def test_input_can_be_bytes():
+     assert c.prodid == "-//Example Inc.//Example Client//EN"
+ 
+ 
+-def test_input_can_not_be_a_string():
+-    """The string interface can be used."""
++def test_input_cannot_be_an_integer():
++    """Unsupported input types are rejected."""
+     with pytest.raises(TypeError):
+-        Component.from_xcal("")
++        Component.from_xcal(42)
+ 
+ 
+ @pytest.mark.parametrize(
+diff --git a/src/icalendar/tests/test_issue_2045_parser_inputs.py b/src/icalendar/tests/test_issue_2045_parser_inputs.py
+new file mode 100644
+index 000000000..f96856930
+--- /dev/null
++++ b/src/icalendar/tests/test_issue_2045_parser_inputs.py
+@@ -0,0 +1,264 @@
++"""Consistent serialized input and file ownership for component parsers."""
++
++import codecs
++from io import BytesIO, StringIO
++from pathlib import Path
++from tempfile import NamedTemporaryFile
++from xml.etree.ElementTree import ParseError
++
++import pytest
++
++from icalendar import Calendar, Component, Event, config
++from icalendar.cal.component_factory import ComponentFactory
++
++
++@pytest.fixture
++def calendar():
++    """A small calendar with non-ASCII text in every serialized format_name."""
++    calendar = Calendar()
++    calendar.add("prodid", "-//Parser input tests//EN")
++    calendar.add("version", "2.0")
++    event = Event()
++    event.add("uid", "parser-inputs")
++    event.add("summary", "Café ☕")
++    calendar.add_component(event)
++    return calendar
++
++
++def serialized(calendar, format_name):
++    """Return serialized bytes without bypassing the public writers."""
++    if format_name == "ical":
++        return calendar.to_ical()
++    if format_name == "jcal":
++        return calendar.to_json().encode()
++    return calendar.to_xcal()
++
++
++def parse(cls, format_name, data):
++    """Normalize only the existing xCal list return type for assertions."""
++    result = getattr(cls, f"from_{format_name}")(data)
++    return result[0] if format_name == "xcal" else result
++
++
++def input_data(data, kind, tmp_path):
++    """Make one of the five inputs, with streams starting after a prefix."""
++    if kind == "str":
++        return data.decode()
++    if kind == "bytes":
++        return data
++    if kind == "Path":
++        path = tmp_path / "calendar.data"
++        path.write_bytes(data)
++        return path
++    if kind == "text":
++        stream = StringIO("prefix" + data.decode())
++    else:
++        stream = BytesIO(b"prefix" + data)
++    stream.seek(6)
++    return stream
++
++
++@pytest.mark.parametrize("cls", [Component, Calendar])
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++@pytest.mark.parametrize("kind", ["str", "bytes", "Path", "text", "binary"])
++def test_serialized_inputs(cls, format_name, kind, calendar, tmp_path):
++    """All parsers accept data, paths and open files, preserving stream ownership."""
++    source = input_data(serialized(calendar, format_name), kind, tmp_path)
++
++    result = parse(cls, format_name, source)
++
++    assert isinstance(result, Calendar)
++    assert result.to_ical() == calendar.to_ical()
++    if kind in {"text", "binary"}:
++        assert not source.closed
++        assert source.read() == ("" if kind == "text" else b"")
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++@pytest.mark.parametrize("mode", ["r", "rb"])
++def test_open_file(format_name, mode, calendar, tmp_path):
++    """Real text and binary files retain their current position and ownership."""
++    path = tmp_path / "calendar.data"
++    path.write_bytes(b"prefix" + serialized(calendar, format_name))
++    kwargs = {"encoding": "utf-8"} if mode == "r" else {}
++    with path.open(mode, **kwargs) as file:
++        file.seek(6)
++
++        assert parse(Calendar, format_name, file) == calendar
++        assert not file.closed
++
++
++@pytest.mark.parametrize("cls", [Component, Calendar])
++def test_native_jcal_list(cls, calendar):
++    """The structured list representation remains supported."""
++    assert cls.from_jcal(calendar.to_jcal()).to_ical() == calendar.to_ical()
++
++
++@pytest.mark.parametrize("cls", [Component, Calendar])
++def test_native_xcal_element(cls, calendar):
++    """The structured XML representation remains supported."""
++    assert (
++        cls.from_xcal(config.parse_xml(BytesIO(calendar.to_xcal())).getroot())[0]
++        == calendar
++    )
++
++
++@pytest.mark.parametrize(
++    ("format_name", "encoding"),
++    [
++        ("jcal", "utf-16"),
++        ("jcal", "utf-32"),
++        ("xcal", "utf-16"),
++        ("xcal", "iso-8859-1"),
++    ],
++)
++@pytest.mark.parametrize("kind", ["bytes", "Path", "binary"])
++def test_encoded_bytes(format_name, encoding, kind, calendar, tmp_path):
++    """Byte inputs retain JSON/XML encoding detection rather than assuming UTF-8."""
++    text = serialized(calendar, format_name).decode()
++    if format_name == "xcal":
++        if encoding == "iso-8859-1":
++            text = text.replace("☕", "tea")
++        text = text.split("?>", 1)[-1]
++        text = f'<?xml version="1.0" encoding="{encoding}"?>' + text
++    source = input_data(text.encode(encoding), kind, tmp_path)
++
++    result = parse(Calendar, format_name, source)
++
++    assert result.events[0].summary == (
++        "Café tea" if encoding == "iso-8859-1" else "Café ☕"
++    )
++
++
++@pytest.mark.parametrize("encoding", ["utf-16", "iso-8859-1"])
++@pytest.mark.parametrize("kind", ["str", "StringIO", "file", "temporary", "codecs"])
++def test_decoded_xml_declaration(encoding, kind, calendar, tmp_path):
++    """Decoded XML is not reinterpreted using its original byte encoding."""
++    text = calendar.to_xcal().decode().split("?>", 1)[-1]
++    if encoding == "iso-8859-1":
++        text = text.replace("☕", "tea")
++    text = f'<?xml version="1.0" encoding="{encoding}"?>' + text
++    expected = "Café tea" if encoding == "iso-8859-1" else "Café ☕"
++
++    def check(source):
++        assert Calendar.from_xcal(source)[0].events[0].summary == expected
++        if kind != "str":
++            assert not source.closed
++
++    if kind == "str":
++        check(text)
++    elif kind == "StringIO":
++        source = StringIO("prefix" + text)
++        source.read(6)
++        check(source)
++    elif kind == "temporary":
++        with NamedTemporaryFile(mode="w+", encoding=encoding, dir=tmp_path) as source:
++            source.write("prefix" + text)
++            source.seek(0)
++            source.read(6)
++            check(source)
++    else:
++        path = tmp_path / "calendar.xml"
++        path.write_text("prefix" + text, encoding=encoding)
++        with (
++            codecs.open(path, encoding=encoding)
++            if kind == "codecs"
++            else path.open(encoding=encoding)
++        ) as source:
++            source.read(6)
++            check(source)
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++@pytest.mark.parametrize("kind", ["text", "binary"])
++def test_caller_stream_remains_open_after_error(format_name, kind, tmp_path):
++    """Invalid data does not transfer ownership of the caller's open file."""
++    source = input_data(b"invalid data", kind, tmp_path)
++
++    with pytest.raises((ValueError, ParseError)):
++        parse(Calendar, format_name, source)
++
++    assert not source.closed
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++@pytest.mark.parametrize("valid", [True, False])
++def test_path_file_is_closed(format_name, valid, calendar, tmp_path, monkeypatch):
++    """Files opened by a parser are closed on successful and failed parsing."""
++    path = tmp_path / "calendar.data"
++    path.write_bytes(serialized(calendar, format_name) if valid else b"invalid data")
++    opened = []
++    original_open = Path.open
++
++    def tracking_open(self, *args, **kwargs):
++        file = original_open(self, *args, **kwargs)
++        opened.append(file)
++        return file
++
++    monkeypatch.setattr(Path, "open", tracking_open)
++    if valid:
++        assert parse(Calendar, format_name, path) == calendar
++    else:
++        with pytest.raises((ValueError, ParseError)):
++            parse(Calendar, format_name, path)
++
++    assert len(opened) == 1
++    assert opened[0].closed
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++def test_string_is_data_not_a_filename(format_name, calendar, tmp_path):
++    """Existing file names passed as strings are never implicitly opened."""
++    path = tmp_path / "calendar.data"
++    path.write_bytes(serialized(calendar, format_name))
++
++    with pytest.raises((ValueError, ParseError)):
++        parse(Calendar, format_name, str(path))
++
++
++@pytest.mark.parametrize("cls", [Component, Calendar])
++@pytest.mark.parametrize("kind", ["text", "binary"])
++def test_multiple_ical_components(cls, kind, calendar, tmp_path):
++    """File inputs retain the multiple-component parsing option."""
++    source = input_data(calendar.to_ical() * 2, kind, tmp_path)
++
++    assert cls.from_ical(source, multiple=True) == [calendar, calendar]
++    assert not source.closed
++
++
++@pytest.mark.parametrize("format_name", ["ical", "jcal", "xcal"])
++def test_custom_factory(format_name, calendar):
++    """Normalizing serialized inputs still uses the entry class's factory."""
++
++    class CustomEvent(Event):
++        pass
++
++    class CustomCalendar(Calendar):
++        _components_factory = ComponentFactory()
++
++    CustomCalendar._components_factory.add_component_class(CustomEvent)
++    source = BytesIO(serialized(calendar, format_name))
++
++    assert isinstance(parse(CustomCalendar, format_name, source).events[0], CustomEvent)
++
++
++@pytest.mark.parametrize("kind", ["text", "binary"])
++def test_configured_xml_parser_receives_caller_stream(
++    kind, calendar, tmp_path, monkeypatch
++):
++    """The configurable XML parser retains the original stream and its position."""
++    source = input_data(calendar.to_xcal(), kind, tmp_path)
++    original_parse = config.parse_xml
++    seen = []
++
++    def parse_xml(file):
++        seen.append(file)
++        assert file is source
++        assert file.tell() == 6
++        return original_parse(file)
++
++    monkeypatch.setattr(config, "parse_xml", parse_xml)
++
++    assert Calendar.from_xcal(source) == [calendar]
++    assert seen == [source]
++    assert not source.closed
