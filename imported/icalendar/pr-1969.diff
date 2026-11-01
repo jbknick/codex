@@ -1,0 +1,102 @@
+diff --git a/news/1888.bugfix.1 b/news/1888.bugfix.1
+new file mode 100644
+index 000000000..1a1ac651b
+--- /dev/null
++++ b/news/1888.bugfix.1
+@@ -0,0 +1 @@
++Fixed :meth:`vCalAddress.to_xcal() <icalendar.prop.cal_address.vCalAddress.to_xcal>` writing characters that are not allowed in XML, such as a C0 control character in an ``ORGANIZER`` or ``SENT-BY`` value parsed from jCal, which made :meth:`Component.to_xcal() <icalendar.cal.component.Component.to_xcal>` produce XML that is not well-formed. The value now goes through the same filter as the text and URI types, and that filter also removes U+FFFE and U+FFFF. I used AI (Claude Opus 5.5, via Claude Code) to find this bug, write the fix, and write its tests; I reviewed and validated the output. @alhudz
+diff --git a/src/icalendar/parser/xcal/string.py b/src/icalendar/parser/xcal/string.py
+index 8fe571b49..958eb1076 100644
+--- a/src/icalendar/parser/xcal/string.py
++++ b/src/icalendar/parser/xcal/string.py
+@@ -33,7 +33,25 @@ def xsd_float_to_string(f: float) -> str:
+     return "-INF"
+ 
+ 
+-_VALID_XML_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
++_INVALID_XML_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
++"""Match the characters that XML 1.0 does not allow in a document.
++
++The ``Char`` production in section 2.2 of XML 1.0 allows only
++``#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]``.
++This pattern matches the characters outside of it that a Python :class:`str`
++can contain, apart from surrogates:
++
++- the C0 control characters ``#x0`` to ``#x1F``, except tab, line feed and
++  carriage return, and
++- the noncharacters ``#xFFFE`` and ``#xFFFF``.
++
++Lone surrogates ``#xD800`` to ``#xDFFF`` are also outside ``Char``, but are not
++matched here. They cannot be encoded as UTF-8, and ``to_ical()`` rejects them.
++
++.. seealso::
++
++    `XML 1.0, section 2.2 Characters <https://www.w3.org/TR/REC-xml/#charsets>`_
++"""
+ 
+ 
+ def _to_valid_xml_string(string: str) -> str:
+@@ -49,7 +67,7 @@ def _to_valid_xml_string(string: str) -> str:
+         `~icalendar.prop.text._strip_unsafe_text_chars`,
+         `Issue 1888 <https://github.com/collective/icalendar/issues/1888>`_,
+     """
+-    return _VALID_XML_CHARACTERS.sub("", string)
++    return _INVALID_XML_CHARACTERS.sub("", string)
+ 
+ 
+ __all__ = ["_to_valid_xml_string", "string_to_xsd_float", "xsd_float_to_string"]
+diff --git a/src/icalendar/prop/cal_address.py b/src/icalendar/prop/cal_address.py
+index 13b9b8f06..ef1f23292 100644
+--- a/src/icalendar/prop/cal_address.py
++++ b/src/icalendar/prop/cal_address.py
+@@ -7,6 +7,7 @@
+ from icalendar.error import JCalParsingError
+ from icalendar.parser import Parameters
+ from icalendar.parser.xcal.base import XCalParser
++from icalendar.parser.xcal.string import _to_valid_xml_string
+ from icalendar.parser.xcal.wrapper import from_xcal_wrapper
+ from icalendar.parser_tools import DEFAULT_ENCODING, to_unicode
+ 
+@@ -317,7 +318,7 @@ def to_xcal(self, element: Element) -> None:
+         """The xCal representation of this property according to :rfc:`6321`."""
+         self.params.to_xcal(element)
+         element = SubElement(element, "cal-address")
+-        element.text = self.ical_value
++        element.text = _to_valid_xml_string(self.ical_value)
+ 
+ 
+ __all__ = ["vCalAddress"]
+diff --git a/src/icalendar/tests/rfc_6321_xcal/test_text_escape.py b/src/icalendar/tests/rfc_6321_xcal/test_text_escape.py
+index 49fc173ff..b4603b407 100644
+--- a/src/icalendar/tests/rfc_6321_xcal/test_text_escape.py
++++ b/src/icalendar/tests/rfc_6321_xcal/test_text_escape.py
+@@ -17,6 +17,7 @@
+ import pytest
+ 
+ from icalendar.config import parse_xml
++from icalendar.prop.cal_address import vCalAddress
+ from icalendar.prop.text import vText
+ from icalendar.prop.uid import vUid
+ from icalendar.prop.unknown import vUnknown
+@@ -39,8 +40,9 @@ def round_trip(xml: Element) -> Element:
+ 
+ # #x9 | #xA | #xD | [#x20-#xD7FF]
+ VALID_CHARACTERS_BELOW_SPACE = "\x09\x0a\x0d"
+-INVALID_CHARACTERS = "".join(
+-    chr(i) for i in range(0x20) if chr(i) not in VALID_CHARACTERS_BELOW_SPACE
++INVALID_CHARACTERS = (
++    "".join(chr(i) for i in range(0x20) if chr(i) not in VALID_CHARACTERS_BELOW_SPACE)
++    + "\ufffe\uffff"
+ )
+ 
+ VALID_CHARACTERS = "".join(
+@@ -107,6 +109,9 @@ def test_xml_round_trips(text):
+     assert round_tripped.text == newline_escape(text)
+ 
+ 
++@pytest.mark.parametrize(
++    "xcal_text_type", [vText, vUnknown, vUid, vUri, vXmlReference, vCalAddress]
++)
+ @pytest.mark.parametrize("text", INVALID_CHARACTERS)
+ @pytest.mark.parametrize("wrap", ["", "asdasdasdasd"])
+ def test_invalid_xml_characters_are_replaced(xcal_text_type, text, wrap):
