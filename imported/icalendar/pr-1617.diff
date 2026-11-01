@@ -1,0 +1,46 @@
+diff --git a/news/1072.documentation.2 b/news/1072.documentation.2
+new file mode 100644
+index 000000000..2cf954060
+--- /dev/null
++++ b/news/1072.documentation.2
+@@ -0,0 +1 @@
++Converted the ``icalendar.cal.component.Component._encode`` docstring from the default Sphinx markup to the project's Google-style format. I used AI (Claude) to help draft the docstring and this entry. @harsh8968
+diff --git a/src/icalendar/cal/component.py b/src/icalendar/cal/component.py
+index 725342ffd..161f49325 100644
+--- a/src/icalendar/cal/component.py
++++ b/src/icalendar/cal/component.py
+@@ -294,23 +294,18 @@ def is_empty(self) -> bool:
+     def _encode(cls, name, value, parameters=None, encode=1):
+         """Encode values to icalendar property values.
+ 
+-        :param name: Name of the property.
+-        :type name: string
+-
+-        :param value: Value of the property. Either of a basic Python type of
+-                      any of the icalendar's own property types.
+-        :type value: Python native type or icalendar property type.
+-
+-        :param parameters: Property parameter dictionary for the value. Only
+-                           available, if encode is set to True.
+-        :type parameters: Dictionary
+-
+-        :param encode: True, if the value should be encoded to one of
+-                       icalendar's own property types (Fallback is "vText")
+-                       or False, if not.
+-        :type encode: Boolean
++        Parameters:
++            name: Name of the property.
++            value: Value of the property. Either a native Python type or
++                any of icalendar's own property types.
++            parameters: Property parameter dictionary for the value. Only
++                used if encode is set to ``True``.
++            encode: ``True`` if the value should be encoded to one of
++                icalendar's own property types (falls back to ``vText``),
++                or ``False`` if not.
+ 
+-        :returns: icalendar property value
++        Returns:
++            The encoded icalendar property value.
+         """
+         if not encode:
+             return value
